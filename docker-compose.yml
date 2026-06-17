@@ -10,11 +10,10 @@ services:
       - FLASK_ENV=production
       - SECRET_KEY=${SECRET_KEY:-change-this-in-production}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-this-in-production}
-      - DATABASE_URI=sqlite:////app/backend/data/chessdb.db
       - STOCKFISH_BASE_DIR=/app/backend
       - ANALYSIS_DEPTH=20
-      - ANALYSIS_THREADS=2
-      - ANALYSIS_HASH=256
+      - ANALYSIS_THREADS=1
+      - ANALYSIS_HASH=64
     volumes:
       - backend-db:/app/backend/data
       - backend-uploads:/app/backend/uploads

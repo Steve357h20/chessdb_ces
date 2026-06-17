@@ -7,7 +7,6 @@ WORKDIR /app/backend
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    libpq-dev \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +46,7 @@ RUN ls -la stockfish/stockfish/ && echo "Stockfish binary verified"
 
 EXPOSE 5000
 
-# 1 worker + 1 Stockfish fits in 512MB; --preload shares initialization
+# 1 worker for 1GB RAM VPS; Stockfish hash 64MB; --preload shares init
 # --timeout 300 for long analysis jobs
 CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5000", "--timeout", "300", "--preload", "run:app"]
 

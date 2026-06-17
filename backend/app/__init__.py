@@ -24,7 +24,14 @@ def create_app(config_name='default'):
     db.init_app(app)
     migrate.init_app(app, db)
     cors_origins = app.config.get('CORS_ORIGINS', '*')
-    CORS(app, resources={r"/api/*": {"origins": cors_origins}})
+    CORS(app, resources={
+        r"/api/*": {"origins": cors_origins},
+        r"/admin/*": {"origins": cors_origins},
+        r"/apidocs/*": {"origins": cors_origins},
+        r"/flasgger/*": {"origins": cors_origins},
+        r"/apispec*": {"origins": cors_origins},
+        r"/": {"origins": cors_origins},
+    })
     jwt.init_app(app)
     limiter.init_app(app)
 

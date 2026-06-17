@@ -1,0 +1,52 @@
+# Backend (Render deploys this separately via Docker)
+backend/
+
+# Documentation
+docs/
+
+# Docker & deployment configs (not needed for Vercel frontend)
+Dockerfile
+docker-compose.yml
+render.yaml
+fly.toml
+nginx.conf
+deploy.sh
+start.bat
+
+# Sample data
+sample_games.pgn
+sample_games_2.pgn
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Git
+.git/
+.gitattributes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.example
+
+# Logs
+*.log
+
+# Backup
+_cleanup_backup/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/

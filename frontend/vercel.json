@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+  "outputDirectory": "dist",
+  "framework": null,
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://RENDER_BACKEND.onrender.com/api/:path*" },
+    { "source": "/admin/:path*", "destination": "https://RENDER_BACKEND.onrender.com/admin/:path*" },
+    { "source": "/apidocs/:path*", "destination": "https://RENDER_BACKEND.onrender.com/apidocs/:path*" },
+    { "source": "/flasgger/:path*", "destination": "https://RENDER_BACKEND.onrender.com/flasgger/:path*" },
+    { "source": "/((?!assets/).*)", "destination": "/index.html" }
+  ]
+}

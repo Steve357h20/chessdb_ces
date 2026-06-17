@@ -10,4 +10,4 @@ zstandard>=0.20.0
 Werkzeug>=3.0.0
 Flask-Admin>=1.6.0
 flasgger>=0.9.7
-psycopg2-binary>=2.9.0
+psycopg2-binary>=2.9.0; platform_system != "Windows" or python_version >= "3.12"
