@@ -429,11 +429,29 @@ async function onDeleteGame(game) {
       '确认删除',
       { type: 'warning' }
     )
+  } catch { return }
+  try {
     await deleteGame(game.id)
     ElMessage.success('删除成功')
     fetchGames()
-  } catch {
-    // cancelled or error
+  } catch (err) {
+    const resp = err.response
+    if (resp && resp.status === 409) {
+      const related = resp.data?.related || {}
+      const msg = `该棋谱存在关联数据（收藏 ${related.collections || 0}、浏览 ${related.browsing_history || 0}、残局 ${related.puzzles || 0}），是否强制删除？`
+      try {
+        await ElMessageBox.confirm(msg, '存在关联数据', { type: 'warning', confirmButtonText: '强制删除', cancelButtonText: '取消' })
+      } catch { return }
+      try {
+        await deleteGame(game.id, true)
+        ElMessage.success('删除成功')
+        fetchGames()
+      } catch (e2) {
+        ElMessage.error('删除失败: ' + ((e2.response?.data?.error) || e2.message || ''))
+      }
+    } else {
+      ElMessage.error('删除失败: ' + ((resp?.data?.error) || err.message || ''))
+    }
   }
 }
 
@@ -446,13 +464,15 @@ async function batchDelete() {
       '批量删除',
       { type: 'warning' }
     )
+  } catch { return }
+  try {
     for (const id of ids) {
-      await deleteGame(id)
+      await deleteGame(id, true)
     }
     ElMessage.success('批量删除成功')
     fetchGames()
-  } catch {
-    // cancelled or error
+  } catch (err) {
+    ElMessage.error('批量删除失败: ' + ((err.response?.data?.error) || err.message || ''))
   }
 }
 

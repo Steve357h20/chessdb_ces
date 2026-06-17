@@ -207,6 +207,8 @@ def get_game(game_id):
 def upload_games():
     """
     上传PGN文件导入棋谱
+    普通用户 → 提交修改申请（target_type=game, action=create），管理员审核后入库
+    管理员 → 直接入库
     ---
     tags:
       - 棋谱管理
@@ -231,9 +233,131 @@ def upload_games():
     if not files or all(f.filename == '' for f in files):
         return jsonify({'error': 'No files selected'}), 400
 
-    parser = PGNParser()
-    recognizer = OpeningRecognizer()
-    uploaded = 0
+    # 判断是否管理员
+    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+    from app.models.user import User as _User
+    from app.models.admin_models import ModificationRequest as _MR
+    import json as _json
+
+    is_admin = False
+    current_user = None
+    try:
+        verify_jwt_in_request(optional=True)
+        identity = get_jwt_identity()
+        if identity is not None:
+            current_user = _User.query.filter_by(username=identity).first()
+            if not current_user:
+                try:
+                    current_user = _User.query.get(int(identity))
+                except (TypeError, ValueError):
+                    current_user = None
+            if current_user and current_user.is_admin:
+                is_admin = True
+    except Exception:
+        pass
+
+    # ---- 管理员：直接入库 ----
+    if is_admin:
+        parser = PGNParser()
+        recognizer = OpeningRecognizer()
+        uploaded = 0
+        skipped = 0
+        errors = []
+
+        for file in files:
+            if not file.filename.endswith(('.pgn', '.txt')):
+                skipped += 1
+                continue
+
+            try:
+                content = file.read().decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    file.seek(0)
+                    content = file.read().decode('latin-1')
+                except Exception as e:
+                    errors.append({'file': file.filename, 'error': str(e)})
+                    continue
+
+            try:
+                games_list = PGNParser.parse_multiple_games(content)
+            except Exception as e:
+                errors.append({'file': file.filename, 'error': str(e)})
+                continue
+
+            for game_data in games_list:
+                try:
+                    info = game_data.get('game_info', {})
+                    white_name = info.get('white', 'Unknown')
+                    black_name = info.get('black', 'Unknown')
+
+                    white_player = Player.query.filter_by(name=white_name).first()
+                    if not white_player:
+                        white_player = Player(name=white_name)
+                        db.session.add(white_player)
+                        db.session.flush()
+
+                    black_player = Player.query.filter_by(name=black_name).first()
+                    if not black_player:
+                        black_player = Player(name=black_name)
+                        db.session.add(black_player)
+                        db.session.flush()
+
+                    pgn_str = _reconstruct_pgn(info, game_data.get('moves', []))
+
+                    eco_code = info.get('eco', '')
+                    opening_name = info.get('opening', '')
+
+                    if not eco_code or not opening_name:
+                        moves_san = []
+                        for m in game_data.get('moves', []):
+                            if m.get('white'):
+                                moves_san.append(m['white'])
+                            if m.get('black'):
+                                moves_san.append(m['black'])
+                        if moves_san:
+                            opening_info = recognizer.identify_opening(moves_san)
+                            if opening_info['eco_code']:
+                                eco_code = eco_code or opening_info['eco_code']
+                                opening_name = opening_name or opening_info['name']
+
+                    game = Game(
+                        white_player_id=white_player.id,
+                        black_player_id=black_player.id,
+                        date=info.get('date', ''),
+                        result=info.get('result', '*'),
+                        pgn_content=pgn_str,
+                        eco_code=eco_code,
+                        opening_name=opening_name,
+                        total_moves=game_data.get('total_moves', 0),
+                        final_fen=game_data.get('final_fen', ''),
+                        white_elo=info.get('white_elo') if info.get('white_elo') else None,
+                        black_elo=info.get('black_elo') if info.get('black_elo') else None,
+                        termination=info.get('termination', ''),
+                        time_control=info.get('timecontrol', info.get('time_control', '')),
+                    )
+                    game.assign_game_number()
+                    db.session.add(game)
+                    uploaded += 1
+                except Exception as e:
+                    logger.error("Error saving game from %s: %s", file.filename, e)
+                    errors.append({'file': file.filename, 'error': str(e)})
+
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            logger.error("Database commit error: %s", e)
+            return jsonify({'error': 'Database error'}), 500
+
+        return jsonify({
+            'uploaded': uploaded,
+            'skipped': skipped,
+            'errors': errors,
+        })
+
+    # ---- 普通用户/游客：提交修改申请 ----
+    submitted = 0
     skipped = 0
     errors = []
 
@@ -241,7 +365,6 @@ def upload_games():
         if not file.filename.endswith(('.pgn', '.txt')):
             skipped += 1
             continue
-
         try:
             content = file.read().decode('utf-8')
         except UnicodeDecodeError:
@@ -252,11 +375,109 @@ def upload_games():
                 errors.append({'file': file.filename, 'error': str(e)})
                 continue
 
+        # 截断过长内容（payload 限制 10KB，PGN 可能很长，保留前 8000 字符）
+        truncated = len(content) > 8000
+        payload_content = content[:8000] if truncated else content
+
+        req = _MR(
+            user_id=current_user.id if current_user else None,
+            target_type='game',
+            action='create',
+            target_id=None,
+            payload_json=_json.dumps({
+                'source': 'upload',
+                'filename': file.filename,
+                'pgn': payload_content,
+                'truncated': truncated,
+            }, ensure_ascii=False),
+            reason=f'上传棋谱文件: {file.filename}',
+            status='pending',
+        )
+        db.session.add(req)
+        submitted += 1
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Database error'}), 500
+
+    return jsonify({
+        'submitted': submitted,
+        'skipped': skipped,
+        'errors': errors,
+        'message': f'已提交 {submitted} 条上传申请，等待管理员审核',
+        'need_review': True,
+    })
+
+
+@games_bp.route('/upload-pgn', methods=['POST'])
+@limiter.limit("10 per minute")
+def upload_pgn_text():
+    """
+    通过PGN文本导入棋谱
+    普通用户 → 提交修改申请，管理员审核后入库
+    管理员 → 直接入库
+    ---
+    tags:
+      - 棋谱管理
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            pgn:
+              type: string
+              description: PGN格式文本
+    responses:
+      200:
+        description: 导入结果
+      400:
+        description: PGN内容为空
+    """
+    data = request.get_json()
+    if not data or 'pgn' not in data:
+        return jsonify({'error': 'pgn field is required'}), 400
+
+    content = data['pgn'].strip()
+    if not content:
+        return jsonify({'error': 'PGN content is empty'}), 400
+
+    # 判断是否管理员
+    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+    from app.models.user import User as _User
+    from app.models.admin_models import ModificationRequest as _MR
+    import json as _json
+
+    is_admin = False
+    current_user = None
+    try:
+        verify_jwt_in_request(optional=True)
+        identity = get_jwt_identity()
+        if identity is not None:
+            current_user = _User.query.filter_by(username=identity).first()
+            if not current_user:
+                try:
+                    current_user = _User.query.get(int(identity))
+                except (TypeError, ValueError):
+                    current_user = None
+            if current_user and current_user.is_admin:
+                is_admin = True
+    except Exception:
+        pass
+
+    # ---- 管理员：直接入库 ----
+    if is_admin:
+        parser = PGNParser()
+        recognizer = OpeningRecognizer()
+        imported = 0
+
         try:
             games_list = PGNParser.parse_multiple_games(content)
         except Exception as e:
-            errors.append({'file': file.filename, 'error': str(e)})
-            continue
+            return jsonify({'error': f'PGN parse error: {str(e)}'}), 400
 
         for game_data in games_list:
             try:
@@ -311,131 +532,48 @@ def upload_games():
                 )
                 game.assign_game_number()
                 db.session.add(game)
-                uploaded += 1
+                imported += 1
             except Exception as e:
-                logger.error("Error saving game from %s: %s", file.filename, e)
-                errors.append({'file': file.filename, 'error': str(e)})
+                logger.error("Error saving game from PGN text: %s", e)
 
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            logger.error("Database commit error: %s", e)
+            return jsonify({'error': 'Database error'}), 500
+
+        return jsonify({'imported': imported})
+
+    # ---- 普通用户/游客：提交修改申请 ----
+    truncated = len(content) > 8000
+    payload_content = content[:8000] if truncated else content
+
+    req = _MR(
+        user_id=current_user.id if current_user else None,
+        target_type='game',
+        action='create',
+        target_id=None,
+        payload_json=_json.dumps({
+            'source': 'paste',
+            'pgn': payload_content,
+            'truncated': truncated,
+        }, ensure_ascii=False),
+        reason='粘贴上传棋谱',
+        status='pending',
+    )
+    db.session.add(req)
     try:
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        logger.error("Database commit error: %s", e)
         return jsonify({'error': 'Database error'}), 500
 
     return jsonify({
-        'uploaded': uploaded,
-        'skipped': skipped,
-        'errors': errors,
+        'submitted': 1,
+        'message': '已提交上传申请，等待管理员审核',
+        'need_review': True,
     })
-
-
-@games_bp.route('/upload-pgn', methods=['POST'])
-@limiter.limit("10 per minute")
-def upload_pgn_text():
-    """
-    通过PGN文本导入棋谱
-    ---
-    tags:
-      - 棋谱管理
-    parameters:
-      - name: body
-        in: body
-        required: true
-        schema:
-          type: object
-          properties:
-            pgn:
-              type: string
-              description: PGN格式文本
-    responses:
-      200:
-        description: 导入结果
-      400:
-        description: PGN内容为空
-    """
-    data = request.get_json()
-    if not data or 'pgn' not in data:
-        return jsonify({'error': 'pgn field is required'}), 400
-
-    content = data['pgn'].strip()
-    if not content:
-        return jsonify({'error': 'PGN content is empty'}), 400
-
-    parser = PGNParser()
-    recognizer = OpeningRecognizer()
-    imported = 0
-
-    try:
-        games_list = PGNParser.parse_multiple_games(content)
-    except Exception as e:
-        return jsonify({'error': f'PGN parse error: {str(e)}'}), 400
-
-    for game_data in games_list:
-        try:
-            info = game_data.get('game_info', {})
-            white_name = info.get('white', 'Unknown')
-            black_name = info.get('black', 'Unknown')
-
-            white_player = Player.query.filter_by(name=white_name).first()
-            if not white_player:
-                white_player = Player(name=white_name)
-                db.session.add(white_player)
-                db.session.flush()
-
-            black_player = Player.query.filter_by(name=black_name).first()
-            if not black_player:
-                black_player = Player(name=black_name)
-                db.session.add(black_player)
-                db.session.flush()
-
-            pgn_str = _reconstruct_pgn(info, game_data.get('moves', []))
-
-            eco_code = info.get('eco', '')
-            opening_name = info.get('opening', '')
-
-            if not eco_code or not opening_name:
-                moves_san = []
-                for m in game_data.get('moves', []):
-                    if m.get('white'):
-                        moves_san.append(m['white'])
-                    if m.get('black'):
-                        moves_san.append(m['black'])
-                if moves_san:
-                    opening_info = recognizer.identify_opening(moves_san)
-                    if opening_info['eco_code']:
-                        eco_code = eco_code or opening_info['eco_code']
-                        opening_name = opening_name or opening_info['name']
-
-            game = Game(
-                white_player_id=white_player.id,
-                black_player_id=black_player.id,
-                date=info.get('date', ''),
-                result=info.get('result', '*'),
-                pgn_content=pgn_str,
-                eco_code=eco_code,
-                opening_name=opening_name,
-                total_moves=game_data.get('total_moves', 0),
-                final_fen=game_data.get('final_fen', ''),
-                white_elo=info.get('white_elo') if info.get('white_elo') else None,
-                black_elo=info.get('black_elo') if info.get('black_elo') else None,
-                termination=info.get('termination', ''),
-                time_control=info.get('timecontrol', info.get('time_control', '')),
-            )
-            game.assign_game_number()
-            db.session.add(game)
-            imported += 1
-        except Exception as e:
-            logger.error("Error saving game from PGN text: %s", e)
-
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        logger.error("Database commit error: %s", e)
-        return jsonify({'error': 'Database error'}), 500
-
-    return jsonify({'imported': imported})
 
 
 @games_bp.route('/<int:game_id>', methods=['PUT'])
@@ -443,6 +581,8 @@ def upload_pgn_text():
 def update_game(game_id):
     """
     更新棋谱信息
+    普通用户 → 提交修改申请，管理员审核后生效
+    管理员 → 直接修改
     ---
     tags:
       - 棋谱管理
@@ -480,6 +620,47 @@ def update_game(game_id):
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
+    # 判断是否管理员
+    from flask_jwt_extended import get_jwt_identity
+    from app.models.user import User as _User
+    from app.models.admin_models import ModificationRequest as _MR
+    import json as _json
+
+    identity = get_jwt_identity()
+    current_user = _User.query.filter_by(username=identity).first()
+    if not current_user:
+        try:
+            current_user = _User.query.get(int(identity))
+        except (TypeError, ValueError):
+            current_user = None
+
+    if not current_user:
+        return jsonify({'error': 'User not found'}), 401
+
+    # 普通用户：提交修改申请
+    if not current_user.is_admin:
+        allowed_fields = ['date', 'result', 'eco_code', 'opening_name', 'tournament_id']
+        payload = {k: v for k, v in data.items() if k in allowed_fields}
+        if not payload:
+            return jsonify({'error': 'No valid fields to update'}), 400
+
+        req = _MR(
+            user_id=current_user.id,
+            target_type='game',
+            action='update',
+            target_id=game_id,
+            payload_json=_json.dumps(payload, ensure_ascii=False),
+            reason=f'修改棋谱 #{game_id}',
+            status='pending',
+        )
+        db.session.add(req)
+        db.session.commit()
+        return jsonify({
+            'message': '已提交修改申请，等待管理员审核',
+            'need_review': True,
+        }), 202
+
+    # 管理员：直接修改
     allowed_fields = ['date', 'result', 'eco_code', 'opening_name', 'tournament_id']
     for field in allowed_fields:
         if field in data:
@@ -512,22 +693,80 @@ def delete_game(game_id):
     responses:
       200:
         description: 删除成功
+      403:
+        description: 无权限（非 owner / 非 admin）
       404:
         description: 棋谱不存在
+      409:
+        description: 存在关联数据（收藏/浏览）需要 force=true
     """
+    from app.models.user import User
+    from app.models.collection import Collection
+    from app.models.browsing_history import BrowsingHistory
+    from app.models.practice import Puzzle
+
     game = Game.query.get(game_id)
     if not game:
         return jsonify({'error': 'Game not found'}), 404
 
+    # 权限：当前用户必须是 admin 才允许删除（避免越权删公共棋谱）
+    identity = get_jwt_identity()
+    current_user = None
+    if identity is not None:
+        current_user = User.query.filter_by(username=identity).first()
+        if not current_user:
+            try:
+                current_user = User.query.get(int(identity))
+            except (TypeError, ValueError):
+                current_user = None
+    if not current_user or not current_user.is_admin:
+        # 未登录或非管理员：拒绝，并提供"提交修改申请"入口
+        return jsonify({
+            'error': 'Forbidden: only admin can delete games; please submit a modification request',
+            'need_mod_request': True,
+        }), 403
+
+    force = request.args.get('force', 'false').lower() in ('1', 'true', 'yes')
+
+    # 关联数据统计
+    n_collections = Collection.query.filter_by(game_id=game_id).count()
+    n_browsing = BrowsingHistory.query.filter_by(game_id=game_id).count()
+    n_puzzles = Puzzle.query.filter_by(source_game_id=game_id).count()
+
+    if not force and (n_collections + n_browsing + n_puzzles > 0):
+        return jsonify({
+            'error': 'Game has related data; retry with ?force=true',
+            'related': {
+                'collections': n_collections,
+                'browsing_history': n_browsing,
+                'puzzles': n_puzzles,
+            }
+        }), 409
+
     try:
+        # 级联清理
         Analysis.query.filter_by(game_id=game_id).delete()
+        Collection.query.filter_by(game_id=game_id).delete()
+        BrowsingHistory.query.filter_by(game_id=game_id).delete()
+        # 残局仅断开引用，不删除
+        if n_puzzles:
+            Puzzle.query.filter_by(source_game_id=game_id).update({'source_game_id': None})
         db.session.delete(game)
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        logger.exception("Delete game %s failed", game_id)
+        return jsonify({'error': f'Delete failed: {e}'}), 500
 
-    return jsonify({'message': 'Game deleted'})
+    return jsonify({
+        'message': 'Game deleted',
+        'cascade': {
+            'analyses': 1,
+            'collections': n_collections,
+            'browsing_history': n_browsing,
+            'puzzles_unlinked': n_puzzles,
+        }
+    })
 
 
 @games_bp.route('/<int:game_id>/moves', methods=['GET'])

@@ -141,6 +141,50 @@ const mainChartRef = ref(null)
 const scatterChartRef = ref(null)
 const histChartRef = ref(null)
 
+// 最小二乘法线性回归
+function linearRegression(points) {
+  const n = points.length
+  if (n < 2) return null
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0
+  for (const [x, y] of points) {
+    sumX += x; sumY += y; sumXY += x * y; sumX2 += x * x
+  }
+  const denom = n * sumX2 - sumX * sumX
+  if (denom === 0) return null
+  const slope = (n * sumXY - sumX * sumY) / denom
+  const intercept = (sumY - slope * sumX) / n
+  // R^2
+  const yMean = sumY / n
+  let ssTot = 0, ssRes = 0
+  for (const [x, y] of points) {
+    ssTot += (y - yMean) ** 2
+    ssRes += (y - (slope * x + intercept)) ** 2
+  }
+  const r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot
+  return { slope, intercept, r2 }
+}
+
+// 计算预测残差并按 IQR 剔除离群点（针对 x 轴为 ELO 的桶点）
+function filterOutliers(points, k = 1.5) {
+  if (points.length < 4) return { kept: points, removed: [], bounds: null }
+  const ys = points.map(p => p[1]).sort((a, b) => a - b)
+  const q1 = ys[Math.floor(ys.length * 0.25)]
+  const q3 = ys[Math.floor(ys.length * 0.75)]
+  const iqr = q3 - q1
+  const lower = q1 - k * iqr
+  const upper = q3 + k * iqr
+  const kept = []
+  const removed = []
+  for (const p of points) {
+    if (p[1] >= lower && p[1] <= upper) {
+      kept.push(p)
+    } else {
+      removed.push(p)
+    }
+  }
+  return { kept, removed, bounds: { lower, upper, q1, q3, iqr } }
+}
+
 const eloRange = computed(() => {
   if (!buckets.value.length) return '-'
   const elos = buckets.value.map(b => b.avg_elo)
@@ -167,7 +211,83 @@ const mainChartOption = computed(() => {
   const yData = buckets.value.map(b => b.avg_moves)
   const sizeData = buckets.value.map(b => b.game_count)
 
+  // 线性拟合：先按 IQR 剔除离群点，再用稳健数据重算
+  const rawPoints = xData.map((x, i) => [x, yData[i]])
+  const { kept, removed, bounds } = filterOutliers(rawPoints, 1.5)
+  const fitRaw = linearRegression(rawPoints)            // 全量拟合（参考）
+  const fit = linearRegression(kept.length >= 2 ? kept : rawPoints)  // 稳健拟合（用于趋势线）
+  // 离群标记
+  const removedSet = new Set(removed.map(p => `${p[0]}_${p[1]}`))
+
   const series = []
+
+  // 趋势线 + 预测延伸
+  if (fit) {
+    const xMin = Math.min(...xData)
+    const xMax = Math.max(...xData)
+    const xRange = xMax - xMin || 1
+    // 预测延伸 20% 范围
+    const predMin = xMin - xRange * 0.1
+    const predMax = xMax + xRange * 0.2
+    const predStep = xRange / 50
+    const trendData = []
+    const predData = []
+    for (let x = predMin; x <= predMax; x += predStep) {
+      const y = fit.slope * x + fit.intercept
+      if (x < xMin) {
+        predData.push([x, y])
+      } else if (x > xMax) {
+        if (predData.length === 0) predData.push([xData[xData.length - 1], fit.slope * xData[xData.length - 1] + fit.intercept])
+        predData.push([x, y])
+      } else {
+        trendData.push([x, y])
+      }
+    }
+    // 确保趋势线覆盖数据范围端点
+    if (trendData.length > 0) {
+      trendData[0] = [xMin, fit.slope * xMin + fit.intercept]
+      trendData[trendData.length - 1] = [xMax, fit.slope * xMax + fit.intercept]
+    }
+
+    const removedInfo = (removed.length > 0 && fitRaw)
+      ? `\u00A0\u00A0剔除 ${removed.length}/${rawPoints.length} 离群点 (IQR ${bounds.lower.toFixed(1)}~${bounds.upper.toFixed(1)})`
+      : ''
+    const fitLabel = `y = ${fit.slope >= 0 ? '' : '-'}${Math.abs(fit.slope).toFixed(4)}x ${fit.intercept >= 0 ? '+' : '-'} ${Math.abs(fit.intercept).toFixed(2)}  (R\u00B2=${fit.r2.toFixed(4)})${removedInfo}`
+
+    series.push({
+      name: `线性拟合 ${fitLabel}`,
+      type: 'line',
+      data: trendData,
+      smooth: false,
+      symbol: 'none',
+      lineStyle: { width: 2, color: '#f56c6c', type: 'dashed' },
+      itemStyle: { color: '#f56c6c' },
+      tooltip: {
+        formatter: (params) => {
+          return `线性拟合<br/>ELO: ${params.data[0].toFixed(0)}<br/>预测步数: ${params.data[1].toFixed(1)}<br/>${fitLabel}`
+        },
+      },
+      z: 10,
+    })
+
+    if (predData.length > 0) {
+      series.push({
+        name: '预测延伸',
+        type: 'line',
+        data: predData,
+        smooth: false,
+        symbol: 'none',
+        lineStyle: { width: 2, color: '#f56c6c', type: [6, 6] },
+        itemStyle: { color: '#f56c6c', opacity: 0.5 },
+        tooltip: {
+          formatter: (params) => {
+            return `预测延伸<br/>ELO: ${params.data[0].toFixed(0)}<br/>预测步数: ${params.data[1].toFixed(1)}`
+          },
+        },
+        z: 9,
+      })
+    }
+  }
 
   if (chartMode.value === 'line' || chartMode.value === 'both') {
     series.push({
@@ -192,13 +312,38 @@ const mainChartOption = computed(() => {
   }
 
   if (chartMode.value === 'scatter' || chartMode.value === 'both') {
+    // 把散点拆为正常点 + 离群点两个 series，离群点用醒目红色
+    const normalPts = []
+    const outlierPts = []
+    xData.forEach((x, i) => {
+      const isOutlier = removedSet.has(`${x}_${yData[i]}`)
+      const pt = [x, yData[i], sizeData[i], isOutlier]
+      if (isOutlier) outlierPts.push(pt); else normalPts.push(pt)
+    })
     series.push({
       name: '对局数（点大小=对局数量）',
       type: 'scatter',
-      data: xData.map((x, i) => [x, yData[i], sizeData[i]]),
+      data: normalPts,
       symbolSize: (val) => Math.max(6, Math.sqrt(val[2]) * 1.5),
       itemStyle: { color: 'rgba(230,162,60,0.7)', borderColor: '#e6a23c', borderWidth: 1 },
     })
+    if (outlierPts.length > 0) {
+      series.push({
+        name: `离群点（已剔除 ${outlierPts.length}）`,
+        type: 'scatter',
+        data: outlierPts,
+        symbolSize: (val) => Math.max(8, Math.sqrt(val[2]) * 1.5),
+        itemStyle: { color: 'rgba(245,108,108,0.85)', borderColor: '#c45656', borderWidth: 2 },
+        symbol: 'diamond',
+        tooltip: {
+          formatter: (params) => {
+            const d = params.data
+            return `⚠️ 离群点（未参与拟合）<br/>ELO均分: ${d[0]}<br/>平均步数: ${d[1]}<br/>对局数: ${d[2]}`
+          },
+        },
+        z: 11,
+      })
+    }
   }
 
   return {
@@ -569,6 +714,58 @@ const boxplotOption = computed(() => {
         itemStyle: { color: '#e6a23c' },
         z: 3,
       },
+      // 箱线图线性拟合趋势线（先按 IQR 剔除离群 ELO 桶）
+      ...(function () {
+        if (dist.length < 2) return []
+        const pts = dist.map(d => [d.elo_bucket, d.mean])
+        const { kept, removed, bounds } = filterOutliers(pts, 1.5)
+        const fit = linearRegression(kept.length >= 2 ? kept : pts)
+        if (!fit) return []
+        const removedInfo = (removed.length > 0)
+          ? `\u00A0\u00A0剔除 ${removed.length}/${pts.length} 离群点 (IQR ${bounds.lower.toFixed(1)}~${bounds.upper.toFixed(1)})`
+          : ''
+        const fitLabel = `y = ${fit.slope >= 0 ? '' : '-'}${Math.abs(fit.slope).toFixed(4)}x ${fit.intercept >= 0 ? '+' : '-'} ${Math.abs(fit.intercept).toFixed(2)}  (R\u00B2=${fit.r2.toFixed(4)})${removedInfo}`
+        const trendData = categories.map((_, i) => fit.slope * dist[i].elo_bucket + fit.intercept)
+        return [{
+          name: `线性拟合 ${fitLabel}`,
+          type: 'line',
+          data: trendData,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { width: 2, color: '#f56c6c', type: 'dashed' },
+          itemStyle: { color: '#f56c6c' },
+          tooltip: {
+            formatter: (params) => {
+              return `线性拟合<br/>ELO: ${dist[params.dataIndex].elo_bucket}<br/>预测均值: ${params.data.toFixed(1)}<br/>${fitLabel}`
+            },
+          },
+          z: 4,
+        }]
+      })(),
+      // 箱线图离群点高亮（红色菱形）
+      ...(function () {
+        if (dist.length < 4) return []
+        const pts = dist.map(d => [d.elo_bucket, d.mean])
+        const { removed } = filterOutliers(pts, 1.5)
+        if (removed.length === 0) return []
+        const catMap = new Map(categories.map((c, i) => [c, i]))
+        const outlierData = removed.map(p => catMap.get(`${p[0]}`) ?? null).filter(i => i !== null)
+        return [{
+          name: `离群点（已剔除 ${outlierData.length}）`,
+          type: 'scatter',
+          data: outlierData,
+          symbol: 'diamond',
+          symbolSize: 12,
+          itemStyle: { color: 'rgba(245,108,108,0.9)', borderColor: '#c45656', borderWidth: 2 },
+          tooltip: {
+            formatter: (params) => {
+              const i = params.dataIndex
+              return `⚠️ 离群点（未参与拟合）<br/>ELO: ${removed[i][0]}<br/>均值: ${removed[i][1].toFixed(1)}`
+            },
+          },
+          z: 5,
+        }]
+      })(),
     ],
   }
 })

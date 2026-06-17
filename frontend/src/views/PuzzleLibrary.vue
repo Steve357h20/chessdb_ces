@@ -29,10 +29,15 @@
         <el-option label="高级" value="hard" />
         <el-option label="专家" value="expert" />
       </el-select>
-      <el-select v-model="filterSource" placeholder="来源" clearable size="small" style="width: 120px" @change="loadPuzzles">
-        <el-option label="预设残局" value="preset" />
+      <el-select v-model="filterSource" placeholder="来源" clearable size="small" style="width: 140px" @change="loadPuzzles">
+        <el-option label="全部" value="" />
+        <el-option label="系统预设" value="preset" />
         <el-option label="棋谱截取" value="user" />
+        <el-option v-if="isLoggedIn" label="我创建的" value="mine" />
       </el-select>
+      <el-button v-if="isLoggedIn" size="small" type="primary" @click="showCreateDialog = true">
+        <el-icon><Plus /></el-icon>创建残局
+      </el-button>
     </div>
 
     <div v-if="loading" class="pl-loading">
@@ -174,18 +179,63 @@
         <el-button type="primary" @click="startPractice">开始练习</el-button>
       </template>
     </el-dialog>
+
+    <!-- 创建残局对话框 -->
+    <el-dialog v-model="showCreateDialog" title="创建自定义残局" width="520px">
+      <el-form :model="newPuzzle" label-width="80px" size="default">
+        <el-form-item label="名称" required>
+          <el-input v-model="newPuzzle.name" placeholder="例如：基础杀王练习" />
+        </el-form-item>
+        <el-form-item label="FEN" required>
+          <el-input v-model="newPuzzle.fen" type="textarea" :rows="2" placeholder="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" />
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-select v-model="newPuzzle.category" style="width: 100%">
+            <el-option label="残局" value="endgame" />
+            <el-option label="将杀" value="mate" />
+            <el-option label="战术" value="tactics" />
+            <el-option label="开局" value="opening" />
+            <el-option label="中局" value="middlegame" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="难度">
+          <el-select v-model="newPuzzle.difficulty" style="width: 100%">
+            <el-option label="入门" value="beginner" />
+            <el-option label="初级" value="easy" />
+            <el-option label="中级" value="medium" />
+            <el-option label="高级" value="hard" />
+            <el-option label="专家" value="expert" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="newPuzzle.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="提示">
+          <el-input v-model="newPuzzle.hint" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showCreateDialog = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { InfoFilled, QuestionFilled } from '@element-plus/icons-vue'
-import { getPuzzles, getPuzzle } from '@/api/practice'
+import { InfoFilled, QuestionFilled, Plus } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { getPuzzles, getPuzzle, createPuzzle } from '@/api/practice'
+import { useUserStore } from '@/store/userStore'
 import PracticeBoard from '@/components/PracticeBoard.vue'
 
 const router = useRouter()
 const route = useRoute()
+const userStore = useUserStore()
+const isLoggedIn = computed(() => userStore.isLoggedIn)
+const currentUserId = ref(null)
 
 const puzzles = ref([])
 const loading = ref(false)
@@ -197,6 +247,10 @@ const filterCategory = ref('')
 const filterDifficulty = ref('')
 const filterSource = ref('')
 const filterSourceGameId = ref(null)
+
+const showCreateDialog = ref(false)
+const newPuzzle = ref({ name: '', fen: '', category: 'endgame', difficulty: 'medium', description: '', hint: '' })
+const creating = ref(false)
 
 const showDetailDialog = ref(false)
 const selectedPuzzle = ref(null)
@@ -250,16 +304,21 @@ async function loadPuzzles() {
     if (filterCategory.value) params.category = filterCategory.value
     if (filterDifficulty.value) params.difficulty = filterDifficulty.value
     if (filterSourceGameId.value) params.source_game_id = filterSourceGameId.value
+    if (filterSource.value === 'mine' && isLoggedIn.value) {
+      params.only_mine = 1
+    }
 
     const res = await getPuzzles(params)
     const data = res.data || res
     let items = data.puzzles || []
+    currentUserId.value = data.current_user_id || null
 
     if (filterSource.value === 'preset') {
       items = items.filter(p => p.is_preset)
     } else if (filterSource.value === 'user') {
       items = items.filter(p => !p.is_preset)
     }
+    // 'mine' 已在后端过滤（only_mine=1）
 
     puzzles.value = items
     total.value = data.total || items.length
@@ -267,6 +326,25 @@ async function loadPuzzles() {
     puzzles.value = []
   } finally {
     loading.value = false
+  }
+}
+
+async function submitCreate() {
+  if (!newPuzzle.value.name || !newPuzzle.value.fen) {
+    ElMessage.warning('请填写名称和 FEN')
+    return
+  }
+  creating.value = true
+  try {
+    await createPuzzle(newPuzzle.value)
+    ElMessage.success('创建成功')
+    showCreateDialog.value = false
+    newPuzzle.value = { name: '', fen: '', category: 'endgame', difficulty: 'medium', description: '', hint: '' }
+    await loadPuzzles()
+  } catch (e) {
+    ElMessage.error('创建失败: ' + (e.message || ''))
+  } finally {
+    creating.value = false
   }
 }
 

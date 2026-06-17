@@ -28,8 +28,9 @@ export function updateGame(id, data) {
   return request.put(`/games/${id}`, data)
 }
 
-export function deleteGame(id) {
-  return request.delete(`/games/${id}`)
+export function deleteGame(id, force = false) {
+  const params = force ? { force: 'true' } : {}
+  return request.delete(`/games/${id}`, { params })
 }
 
 export function analyzeGame(id, params) {

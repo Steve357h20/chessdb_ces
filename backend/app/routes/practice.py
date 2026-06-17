@@ -91,9 +91,26 @@ def list_puzzles():
     category = request.args.get('category', '').strip()
     difficulty = request.args.get('difficulty', '').strip()
     source_game_id = request.args.get('source_game_id', type=int)
+    only_mine = request.args.get('only_mine', '').lower() in ('1', 'true', 'yes')
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 50, type=int)
     per_page = min(per_page, 100)
+
+    # 个性化逻辑：识别当前登录用户，未登录只能看预设
+    from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
+    current_user = None
+    try:
+        verify_jwt_in_request(optional=True)
+        identity = get_jwt_identity()
+        if identity is not None:
+            current_user = User.query.filter_by(username=identity).first()
+            if not current_user:
+                try:
+                    current_user = User.query.get(int(identity))
+                except (TypeError, ValueError):
+                    current_user = None
+    except Exception:
+        current_user = None
 
     q = Puzzle.query
     if category:
@@ -103,7 +120,30 @@ def list_puzzles():
     if source_game_id:
         q = q.filter_by(source_game_id=source_game_id)
 
-    q = q.order_by(Puzzle.created_at.desc())
+    if only_mine:
+        # 明确只看"我的"个性化残局（未登录则返回空）
+        if current_user:
+            q = q.filter(Puzzle.created_by == current_user.id)
+        else:
+            return jsonify({
+                'puzzles': [],
+                'total': 0,
+                'page': page,
+                'per_page': per_page,
+                'pages': 0,
+                'current_user_id': None,
+            })
+    else:
+        # 默认：系统预设 OR 当前用户自建（多用户隔离）
+        if current_user:
+            q = q.filter(db.or_(
+                Puzzle.is_preset.is_(True),
+                Puzzle.created_by == current_user.id,
+            ))
+        else:
+            q = q.filter(Puzzle.is_preset.is_(True))
+
+    q = q.order_by(Puzzle.is_preset.desc(), Puzzle.created_at.desc())
     pagination = q.paginate(page=page, per_page=per_page, error_out=False)
 
     return jsonify({
@@ -112,6 +152,7 @@ def list_puzzles():
         'page': page,
         'per_page': per_page,
         'pages': pagination.pages,
+        'current_user_id': current_user.id if current_user else None,
     })
 
 
@@ -147,6 +188,8 @@ def get_puzzle_detail(puzzle_id):
 def create_puzzle():
     """
     创建残局
+    普通用户 → 提交修改申请，管理员审核后创建
+    管理员 → 直接创建
     ---
     tags:
       - 练习管理
@@ -199,8 +242,50 @@ def create_puzzle():
         return jsonify({'error': f'Invalid FEN: {e}'}), 400
 
     identity = get_jwt_identity()
-    user = User.query.filter_by(username=identity).first()
+    # 兼容 username（旧） 与 user_id（str/int，新）
+    user = None
+    if identity is not None:
+        user = User.query.filter_by(username=identity).first()
+        if not user:
+            try:
+                user = User.query.get(int(identity))
+            except (TypeError, ValueError):
+                user = None
 
+    if not user:
+        return jsonify({'error': 'User not found'}), 401
+
+    # 普通用户：提交修改申请
+    if not user.is_admin:
+        from app.models.admin_models import ModificationRequest
+        import json as _json
+        payload = {
+            'name': name[:200],
+            'fen': fen,
+            'category': data.get('category', 'endgame'),
+            'difficulty': data.get('difficulty', 'medium'),
+            'description': (data.get('description') or '')[:2000],
+            'hint': (data.get('hint') or '')[:500],
+            'source_game_id': data.get('source_game_id'),
+            'from_move': data.get('from_move'),
+        }
+        req = ModificationRequest(
+            user_id=user.id,
+            target_type='puzzle',
+            action='create',
+            target_id=None,
+            payload_json=_json.dumps(payload, ensure_ascii=False),
+            reason=f'创建残局: {name}',
+            status='pending',
+        )
+        db.session.add(req)
+        db.session.commit()
+        return jsonify({
+            'message': '已提交残局创建申请，等待管理员审核',
+            'need_review': True,
+        }), 202
+
+    # 管理员：直接创建
     puzzle = Puzzle(
         name=name,
         category=data.get('category', 'endgame'),
@@ -210,7 +295,7 @@ def create_puzzle():
         fen=fen,
         source_game_id=data.get('source_game_id'),
         from_move=data.get('from_move'),
-        created_by=user.id if user else None,
+        created_by=user.id,
         is_preset=False,
     )
     puzzle.assign_puzzle_number()
@@ -231,7 +316,14 @@ def delete_puzzle(puzzle_id):
         return jsonify({'error': 'Cannot delete preset puzzle'}), 403
 
     identity = get_jwt_identity()
-    user = User.query.filter_by(username=identity).first()
+    user = None
+    if identity is not None:
+        user = User.query.filter_by(username=identity).first()
+        if not user:
+            try:
+                user = User.query.get(int(identity))
+            except (TypeError, ValueError):
+                user = None
     if not user or (puzzle.created_by != user.id and not user.is_admin):
         return jsonify({'error': 'Permission denied'}), 403
 

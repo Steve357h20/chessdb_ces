@@ -3,11 +3,13 @@ chcp 65001 >nul
 echo Starting ChessDB...
 echo.
 
-start "ChessDB Backend" cmd /k "cd /d D:\Users\pc\AppData\Local\Programs\trae_projects\ces\backend && .\venv\Scripts\activate.bat && set FLASK_APP=app && flask run --port 5000"
+set "SCRIPT_DIR=%~dp0"
+
+start "ChessDB Backend" cmd /k "cd /d "%SCRIPT_DIR%backend" && .\venv\Scripts\activate.bat && set FLASK_APP=app && flask run --port 5000"
 
 timeout /t 2 /nobreak >nul
 
-start "ChessDB Frontend" cmd /k "cd /d D:\Users\pc\AppData\Local\Programs\trae_projects\ces\frontend && npm run dev"
+start "ChessDB Frontend" cmd /k "cd /d "%SCRIPT_DIR%frontend" && npm run dev"
 
 echo.
 echo Backend:  http://localhost:5000

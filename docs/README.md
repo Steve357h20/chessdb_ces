@@ -252,7 +252,6 @@ python run.py
 ```
 
 ### 前端安装
-
 ```bash
 cd frontend
 npm install
@@ -282,6 +281,46 @@ npm run build
 | FLASK_DEBUG | true | 调试模式 |
 | UPLOAD_FOLDER | ./uploads | 上传目录 |
 | MAX_CONTENT_LENGTH | 16MB | 最大上传大小 |
+
+---
+
+## 答辩后变更记录
+
+> 答辩后老师指出 3 个问题，已全部修复。详见 [`docs/OPTIMIZATION_REPORT.md`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/docs/OPTIMIZATION_REPORT.md) 与 [`docs/PROJECT_ANALYSIS.md`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/docs/PROJECT_ANALYSIS.md) 的"答辩后修复的验证清单"小节。
+
+### 修复清单
+
+| # | 问题 | 修复 | 验证 |
+|---|------|------|------|
+| 1 | 危险操作直接落库 | 新增 `ModificationRequest` 审核流 + 管理控制台 | 端到端测试 3.x 通过 |
+| 1 | 缺后端管理页面 | 新建 [`AdminDashboard.vue`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/frontend/src/views/AdminDashboard.vue) 含 3 个 Tab（审核/流量/用户） | 前端路由守卫生效 |
+| 1 | 缺 API 流量监测 | 新建 [`traffic.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/traffic.py) 中间件 + `ApiAccessLog` 表 | 4.x 测试真实记录 14 条 |
+| 2 | 表分得过多 | 12 张表均为必要；`openings` 建议保留为表+索引 | 已文档化 |
+| 3 | 残局 `created_by` 为空、个性化未实现 | 修复 `practice.py` 中 `User.query.get(int(identity))` 兜底 | 2.1-2.6 全 OK |
+
+### 端到端测试
+
+```powershell
+cd backend
+python tests/test_e2e_fixes.py
+```
+
+输出：
+```
+=== 阶段 1：用户注册 ===           OK
+=== 阶段 2：个性化残局 ===         OK  (created_by=1/2, 用户隔离)
+=== 阶段 3：修改申请审核 ===       OK  (申请→审核→落库)
+=== 阶段 4：流量监测 ===           OK  (24h 14 次请求, 3 用户)
+=== 全部测试通过！===
+```
+
+### 新增文件
+
+- `backend/app/traffic.py` — 流量监控 + 审核 API
+- `backend/app/models/admin_models.py` — `ApiAccessLog`, `ModificationRequest`
+- `backend/tests/test_e2e_fixes.py` — 端到端集成测试
+- `frontend/src/views/AdminDashboard.vue` — 管理控制台
+- `docs/OPTIMIZATION_REPORT.md` — 优化报告
 
 ### 使用说明
 

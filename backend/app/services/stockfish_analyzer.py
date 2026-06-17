@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import time
 from io import StringIO
@@ -25,6 +26,7 @@ class StockfishAnalyzer:
         self._hash_size = hash_size
         self._engine: Optional[chess.engine.SimpleEngine] = None
         self._is_mock = False
+        self._init_error: Optional[str] = None
 
         try:
             self._engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
@@ -37,9 +39,11 @@ class StockfishAnalyzer:
                 stockfish_path, depth, threads, hash_size,
             )
         except Exception as e:
+            import traceback
+            self._init_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             logger.warning(
-                "Failed to initialize Stockfish (%s), falling back to mock analyzer",
-                e,
+                "Failed to initialize Stockfish (%s): %s, falling back to mock analyzer. Path=%s, CWD=%s",
+                type(e).__name__, e, stockfish_path, os.getcwd(),
             )
             self._engine = None
             self._is_mock = True

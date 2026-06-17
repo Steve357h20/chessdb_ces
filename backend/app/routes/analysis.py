@@ -6,14 +6,12 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from app import db, limiter
-from app.models.analysis import Analysis
+from app.models.analysis import Analysis, AnalysisTask
 from app.models.game import Game
 
 logger = logging.getLogger(__name__)
 
 analysis_bp = Blueprint('analysis', __name__)
-
-_analysis_tasks = {}
 
 
 @analysis_bp.route('/game/<int:game_id>/start', methods=['POST'])
@@ -54,23 +52,27 @@ def start_game_analysis(game_id):
             'cached': True,
         })
 
-    for tid, task in _analysis_tasks.items():
-        if task.get('game_id') == game_id and task.get('status') in ('pending', 'running'):
-            return jsonify({
-                'message': 'Analysis already in progress',
-                'task_id': tid,
-                'game_id': game_id,
-            })
+    # Check for in-progress tasks
+    active_task = AnalysisTask.query.filter(
+        AnalysisTask.game_id == game_id,
+        AnalysisTask.status.in_(['pending', 'running']),
+    ).first()
+    if active_task:
+        return jsonify({
+            'message': 'Analysis already in progress',
+            'task_id': active_task.id,
+            'game_id': game_id,
+        })
 
     task_id = str(uuid.uuid4())
-    _analysis_tasks[task_id] = {
-        'task_id': task_id,
-        'game_id': game_id,
-        'status': 'pending',
-        'progress': 0.0,
-        'result': None,
-        'error': None,
-    }
+    task = AnalysisTask(
+        id=task_id,
+        game_id=game_id,
+        status='pending',
+        progress=0.0,
+    )
+    db.session.add(task)
+    db.session.commit()
 
     app = current_app._get_current_object()
     thread = threading.Thread(
@@ -106,16 +108,12 @@ def get_game_analysis_status(game_id):
       200:
         description: 分析状态
     """
-    for tid, task in _analysis_tasks.items():
-        if task.get('game_id') == game_id:
-            return jsonify({
-                'task_id': tid,
-                'game_id': game_id,
-                'status': task.get('status', 'unknown'),
-                'progress': task.get('progress', 0.0),
-                'result': task.get('result'),
-                'error': task.get('error'),
-            })
+    task = AnalysisTask.query.filter_by(game_id=game_id).order_by(
+        AnalysisTask.created_at.desc()
+    ).first()
+
+    if task:
+        return jsonify(task.to_dict())
 
     existing = Analysis.query.filter_by(game_id=game_id).first()
     if existing:
@@ -152,18 +150,11 @@ def get_task_status(task_id):
       404:
         description: 任务不存在
     """
-    task = _analysis_tasks.get(task_id)
+    task = AnalysisTask.query.get(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
 
-    return jsonify({
-        'task_id': task_id,
-        'status': task.get('status', 'unknown'),
-        'progress': task.get('progress', 0.0),
-        'game_id': task.get('game_id'),
-        'result': task.get('result'),
-        'error': task.get('error'),
-    })
+    return jsonify(task.to_dict())
 
 
 @analysis_bp.route('/tasks', methods=['GET'])
@@ -179,20 +170,11 @@ def list_analysis_tasks():
       200:
         description: 分析任务列表
     """
-    task_list = []
-    for tid, task in _analysis_tasks.items():
-        item = {
-            'task_id': tid,
-            'game_id': task.get('game_id'),
-            'status': task.get('status', 'unknown'),
-            'progress': task.get('progress', 0.0),
-            'error': task.get('error'),
-        }
-        if task.get('status') == 'completed' and task.get('result'):
-            item['result'] = task.get('result')
-        task_list.append(item)
+    tasks = AnalysisTask.query.order_by(
+        AnalysisTask.created_at.desc()
+    ).limit(100).all()
 
-    task_list.sort(key=lambda t: t.get('status') == 'running', reverse=True)
+    task_list = [t.to_dict() for t in tasks]
 
     return jsonify({
         'tasks': task_list,
@@ -220,13 +202,14 @@ def cancel_analysis_task(task_id):
       404:
         description: 任务不存在
     """
-    task = _analysis_tasks.get(task_id)
+    task = AnalysisTask.query.get(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
 
-    if task.get('status') in ('pending', 'running'):
-        task['status'] = 'cancelled'
-        task['error'] = 'Cancelled by user'
+    if task.status in ('pending', 'running'):
+        task.status = 'cancelled'
+        task.error = 'Cancelled by user'
+        db.session.commit()
         return jsonify({'message': 'Task cancelled', 'task_id': task_id})
 
     return jsonify({'message': 'Task already finished', 'task_id': task_id})
@@ -258,6 +241,12 @@ def get_engine_info():
     )
 
     info = analyzer.get_engine_info()
+
+    # Include init error details if mock mode was activated
+    if analyzer._is_mock and analyzer._init_error:
+        info['init_error'] = analyzer._init_error
+        logger.error("Stockfish running in mock mode: path=%s, error=%s", stockfish_path, analyzer._init_error)
+
     analyzer.close()
 
     return jsonify({
@@ -273,11 +262,12 @@ def get_engine_info():
 
 def _run_analysis(task_id, game_id, app, pgn_content):
     with app.app_context():
-        task = _analysis_tasks.get(task_id)
+        task = AnalysisTask.query.get(task_id)
         if not task:
             return
 
-        task['status'] = 'running'
+        task.status = 'running'
+        db.session.commit()
 
         from app.services.stockfish_analyzer import StockfishAnalyzer
 
@@ -294,10 +284,12 @@ def _run_analysis(task_id, game_id, app, pgn_content):
         )
 
         def progress_callback(progress, move_data):
-            task['progress'] = round(progress, 2)
-            # 检查是否被取消
-            if task.get('status') == 'cancelled':
+            task.progress = round(progress, 2)
+            # Check cancellation
+            db.session.refresh(task)
+            if task.status == 'cancelled':
                 raise InterruptedError('Analysis cancelled by user')
+            db.session.commit()
 
         try:
             result = analyzer.analyze_game(
@@ -330,22 +322,25 @@ def _run_analysis(task_id, game_id, app, pgn_content):
 
             analysis.set_key_moves(key_moves)
             analysis.set_win_rate_curve(win_rate_curve)
-            db.session.commit()
 
-            task['status'] = 'completed'
-            task['progress'] = 1.0
-            task['result'] = {
+            task.status = 'completed'
+            task.progress = 1.0
+            task.set_result({
                 'analysis_id': analysis.id,
                 'total_moves': result.get('total_moves', 0),
                 'key_moves_count': len(key_moves),
-            }
+            })
+
+            db.session.commit()
 
         except InterruptedError:
-            task['status'] = 'cancelled'
-            task['error'] = 'Cancelled by user'
+            task.status = 'cancelled'
+            task.error = 'Cancelled by user'
+            db.session.commit()
         except Exception as e:
             logger.error("Analysis task %s failed: %s", task_id, e)
-            task['status'] = 'failed'
-            task['error'] = str(e)
+            task.status = 'failed'
+            task.error = str(e)
+            db.session.commit()
         finally:
             analyzer.close()

@@ -60,3 +60,41 @@ class Analysis(db.Model):
 
     def __repr__(self):
         return f'<Analysis game_id={self.game_id}>'
+
+
+class AnalysisTask(db.Model):
+    """Persistent analysis task state, shared across gunicorn workers."""
+    __tablename__ = 'analysis_tasks'
+
+    id = db.Column(db.String(36), primary_key=True)
+    game_id = db.Column(db.Integer, db.ForeignKey('games.id'), nullable=False, index=True)
+    status = db.Column(db.String(20), default='pending')  # pending, running, completed, failed, cancelled
+    progress = db.Column(db.Float, default=0.0)
+    result = db.Column(db.Text, default='')
+    error = db.Column(db.Text, default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def get_result(self):
+        if self.result:
+            try:
+                return json.loads(self.result)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    def set_result(self, data):
+        self.result = json.dumps(data, ensure_ascii=False) if data else ''
+
+    def to_dict(self):
+        return {
+            'task_id': self.id,
+            'game_id': self.game_id,
+            'status': self.status,
+            'progress': self.progress,
+            'result': self.get_result(),
+            'error': self.error or None,
+        }
+
+    def __repr__(self):
+        return f'<AnalysisTask id={self.id} game_id={self.game_id} status={self.status}>'

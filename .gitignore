@@ -36,10 +36,16 @@ uploads/
 node_modules/
 frontend/dist/
 
-# Stockfish source & binaries
+# Stockfish - binaries, source, and docs (download at build time)
 backend/stockfish/stockfish/src/
 backend/stockfish/stockfish/wiki/
 backend/stockfish/stockfish/stockfish-*
+backend/stockfish/stockfish/AUTHORS
+backend/stockfish/stockfish/CITATION.cff
+backend/stockfish/stockfish/CONTRIBUTING.md
+backend/stockfish/stockfish/Copying.txt
+backend/stockfish/stockfish/README.md
+backend/stockfish/stockfish/Top CPU Contributors.txt
 backend/stockfish/*.zip
 
 # Cleanup backup
@@ -55,3 +61,9 @@ htmlcov/
 
 # OS
 Thumbs.db
+
+# Docker volumes
+backend-data/
+
+# Large docs
+docs/*.docx

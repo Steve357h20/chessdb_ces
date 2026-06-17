@@ -141,6 +141,15 @@
             </div>
           </div>
 
+          <div v-if="userStore.isLoggedIn && userStore.isAdmin" class="ml-sidebar-section">
+            <div class="ml-sidebar-title-row">
+              <span class="ml-sidebar-title">管理员</span>
+            </div>
+            <div class="ml-sidebar-link ml-sidebar-link-admin" @click="router.push('/admin/center/overview')">
+              <el-icon><Setting /></el-icon> 管理中心
+            </div>
+          </div>
+
           <div class="ml-sidebar-section ml-sidebar-bottom">
             <div class="ml-sidebar-link" @click="router.push('/help')">
               <el-icon><QuestionFilled /></el-icon> 帮助中心

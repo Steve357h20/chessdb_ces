@@ -55,5 +55,5 @@ def create_admin(username, email, password):
 if __name__ == '__main__':
     host = os.getenv('FLASK_HOST', '0.0.0.0')
     port = int(os.getenv('FLASK_PORT', 5000))
-    debug = os.getenv('FLASK_DEBUG', 'true').lower() in ('true', '1', 'yes')
+    debug = os.getenv('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
     app.run(host=host, port=port, debug=debug)

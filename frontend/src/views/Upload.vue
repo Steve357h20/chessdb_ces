@@ -111,6 +111,18 @@ async function onUpload() {
     const res = await uploadGames(rawFiles)
     const data = res.data || res
 
+    // 普通用户走审核流程
+    if (data.need_review) {
+      results.value = [{
+        filename: '上传申请',
+        success: true,
+        message: data.message || `已提交 ${data.submitted} 条上传申请，等待管理员审核`,
+      }]
+      ElMessage.info(data.message || '已提交申请，等待审核')
+      clearFiles()
+      return
+    }
+
     if (data.results && Array.isArray(data.results)) {
       results.value = data.results.map(r => ({
         filename: r.filename || r.event || '未知',
@@ -121,7 +133,7 @@ async function onUpload() {
       results.value = [{
         filename: '批量上传',
         success: true,
-        message: `成功导入 ${data.imported || data.count || fileList.value.length} 局对局`,
+        message: `成功导入 ${data.imported || data.count || data.uploaded || fileList.value.length} 局对局`,
       }]
     }
 
@@ -144,7 +156,11 @@ async function onPasteSubmit() {
   try {
     const res = await request.post('/games/upload-pgn', { pgn: pgnText.value })
     const data = res.data || res
-    ElMessage.success(`成功导入 ${data.imported || data.count || 1} 局对局`)
+    if (data.need_review) {
+      ElMessage.info(data.message || '已提交上传申请，等待管理员审核')
+    } else {
+      ElMessage.success(`成功导入 ${data.imported || data.count || 1} 局对局`)
+    }
     pgnText.value = ''
   } catch (e) {
     ElMessage.error('PGN 解析失败：' + (e.message || '格式错误'))

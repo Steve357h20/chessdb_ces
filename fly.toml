@@ -3,18 +3,22 @@ primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
+  target = "backend"
 
 [env]
   FLASK_ENV = "production"
+  STOCKFISH_PATH = "/app/backend/stockfish/stockfish/stockfish-ubuntu-x86-64-avx2"
+  ANALYSIS_THREADS = "1"
+  ANALYSIS_HASH = "128"
 
 [http_service]
-  internal_port = 80
+  internal_port = 5000
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
 
 [[vm]]
-  memory = "512mb"
+  memory = "1gb"
   cpu_kind = "shared"
   cpus = 1

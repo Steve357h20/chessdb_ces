@@ -98,6 +98,39 @@ const routes = [
     meta: { title: '我的收藏', requiresAuth: true },
   },
   {
+    path: '/admin',
+    name: 'AdminCenter',
+    component: () => import('@/views/AdminCenter.vue'),
+    meta: { title: '管理中心', requiresAuth: true, requiresAdmin: true },
+    redirect: '/admin/center/overview',
+    children: [
+      {
+        path: 'center/overview',
+        name: 'AdminOverview',
+        component: () => import('@/views/admin/AdminOverview.vue'),
+        meta: { title: '运营总览', requiresAdmin: true },
+      },
+      {
+        path: 'center/traffic',
+        name: 'AdminTraffic',
+        component: () => import('@/views/admin/AdminTraffic.vue'),
+        meta: { title: 'API 流量分析', requiresAdmin: true },
+      },
+      {
+        path: 'center/audit',
+        name: 'AdminAudit',
+        component: () => import('@/views/admin/AdminAudit.vue'),
+        meta: { title: '申请审核', requiresAdmin: true },
+      },
+      {
+        path: 'center/users',
+        name: 'AdminUsers',
+        component: () => import('@/views/admin/AdminUsers.vue'),
+        meta: { title: '用户管理', requiresAdmin: true },
+      },
+    ],
+  },
+  {
     path: '/browsing',
     name: 'BrowsingHistory',
     component: () => import('@/views/BrowsingHistory.vue'),
@@ -143,7 +176,7 @@ const router = createRouter({
   },
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   document.title = `${to.meta.title || '国际象棋数据管理系统'} - ChessDB`
 
   const token = localStorage.getItem('token')
@@ -151,6 +184,25 @@ router.beforeEach((to, from, next) => {
   if (to.meta.requiresAuth && !token) {
     next({ name: 'Login', query: { redirect: to.fullPath } })
     return
+  }
+
+  // 管理员权限校验
+  if (to.meta.requiresAdmin) {
+    try {
+      const userStore = (await import('@/store/userStore')).useUserStore()
+      let u = userStore.user
+      if (!u) {
+        await userStore.fetchUser()
+        u = userStore.user
+      }
+      if (!u || !u.is_admin) {
+        next({ name: 'Home' })
+        return
+      }
+    } catch {
+      next({ name: 'Home' })
+      return
+    }
   }
 
   if (to.meta.guest && token) {

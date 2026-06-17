@@ -23,7 +23,8 @@ def create_app(config_name='default'):
 
     db.init_app(app)
     migrate.init_app(app, db)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    cors_origins = app.config.get('CORS_ORIGINS', '*')
+    CORS(app, resources={r"/api/*": {"origins": cors_origins}})
     jwt.init_app(app)
     limiter.init_app(app)
 
@@ -36,6 +37,12 @@ def create_app(config_name='default'):
 
     from app.admin import setup_admin
     setup_admin(app)
+
+    # 注册 API 流量监控中间件 + 管理后台 API
+    from app.traffic import init_traffic_middleware, admin_api_bp, submit_bp
+    app.register_blueprint(admin_api_bp)
+    app.register_blueprint(submit_bp)
+    init_traffic_middleware(app)
 
     with app.app_context():
         from app import models
