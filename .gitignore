@@ -67,3 +67,10 @@ backend-data/
 
 # Large docs
 docs/*.docx
+
+# Deploy temp files (may contain tokens)
+_deploy*.py
+_vercel_*.json
+
+# npm cache (from frontend builds)
+frontend/.npm-cache/

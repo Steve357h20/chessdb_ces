@@ -1,63 +1,42 @@
-# Hugging Face Spaces 专用 Dockerfile
-# 单容器部署：Flask 后端 + Nginx 前端 + Stockfish
-# HF Spaces 要求端口 7860
+# ============================================================
+# HuggingFace Spaces Docker — ChessDB Backend
+# ============================================================
+# Free tier: 16 GB RAM, 2 vCPU, 50 GB disk
+# Stockfish can run at full power here (unlike Render's 512 MB)
+# ============================================================
 
-# ---- 构建阶段：前端 ----
-FROM node:18-alpine AS frontend-build
-
-WORKDIR /app/frontend
-
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
-
-COPY frontend/ .
-RUN npm run build
-
-
-# ---- 运行阶段：后端 + Nginx + Stockfish ----
 FROM python:3.12-slim
 
-# 安装系统依赖：nginx + stockfish + supervisor
+WORKDIR /app
+
+# Install system dependencies + Stockfish (via apt, most reliable)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    nginx \
+    libpq-dev \
     stockfish \
-    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app/backend
+# Verify Stockfish
+RUN stockfish --version || echo "Stockfish installed at: $(which stockfish)"
 
-# 安装 Python 依赖
+# Python dependencies
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-# 复制后端代码
+# App code
 COPY backend/ .
 
-# 复制前端构建产物到 Nginx 目录
-COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
+# Create necessary directories
+RUN mkdir -p uploads data stockfish/stockfish \
+    && if [ -f "$(which stockfish)" ]; then \
+        cp "$(which stockfish)" stockfish/stockfish/stockfish \
+        && chmod +x stockfish/stockfish/stockfish; \
+    fi
 
-# 复制 Nginx 配置（独立文件，避免 heredoc 导致 IDE 误报）
-COPY hf/nginx.conf /etc/nginx/sites-available/default
-
-# 复制 Supervisor 配置
-COPY hf/supervisord.conf /etc/supervisor/conf.d/chessdb.conf
-
-# 创建数据目录
-RUN mkdir -p /app/backend/data /app/backend/uploads /app/backend/stockfish/stockfish
-
-# 复制 apt 安装的 Stockfish 到项目目录（让 config.py 自动检测）
-RUN STOCKFISH_BIN=$(which stockfish) \
-    && cp "$STOCKFISH_BIN" /app/backend/stockfish/stockfish/stockfish \
-    && chmod +x /app/backend/stockfish/stockfish/stockfish \
-    && echo "Stockfish installed at: $STOCKFISH_BIN"
-
-# 复制启动脚本
-COPY start-hf.sh /app/start.sh
-RUN chmod +x /app/start.sh
-
-# 暴露 HF Spaces 标准端口
+# HF Spaces default port
 EXPOSE 7860
 
-# 启动脚本：自动初始化数据库 + 启动 Nginx/Gunicorn
-CMD ["/app/start.sh"]
+# Gunicorn: 2 workers is safe with 16 GB RAM
+# --preload shares Stockfish init across workers
+# PORT is set by HF Spaces (default 7860)
+CMD ["sh", "-c", "gunicorn -w 2 -b 0.0.0.0:${PORT:-7860} --timeout 300 --preload run:app"]

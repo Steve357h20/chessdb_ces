@@ -5,10 +5,10 @@
   "outputDirectory": "dist",
   "framework": null,
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://chessdb-backend.onrender.com/api/:path*" },
-    { "source": "/admin/:path*", "destination": "https://chessdb-backend.onrender.com/admin/:path*" },
-    { "source": "/apidocs/:path*", "destination": "https://chessdb-backend.onrender.com/apidocs/:path*" },
-    { "source": "/flasgger/:path*", "destination": "https://chessdb-backend.onrender.com/flasgger/:path*" },
+    { "source": "/api/:path*", "destination": "https://357h20-chessdb.hf.space/api/:path*" },
+    { "source": "/admin/:path*", "destination": "https://357h20-chessdb.hf.space/admin/:path*" },
+    { "source": "/apidocs/:path*", "destination": "https://357h20-chessdb.hf.space/apidocs/:path*" },
+    { "source": "/flasgger/:path*", "destination": "https://357h20-chessdb.hf.space/flasgger/:path*" },
     { "source": "/((?!assets/).*)", "destination": "/index.html" }
   ]
 }
