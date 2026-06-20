@@ -1,242 +1,559 @@
-# 后端API路由层 (`backend/app/routes/`)
+# 路由层（Routes）
 
-## 概述
+> 8 个 Flask Blueprint，对应 8 个业务域。统一以 `/api/<domain>` 前缀挂载。
+>
+> 完整 API 参考：[docs/API.md](../API.md)
 
-路由层基于 Flask Blueprint 模式实现，每个业务模块对应一个 Blueprint 文件。所有 API 统一注册到 `/api/` 前缀下，支持 JWT 认证、限流保护和 Swagger 文档生成。路由层负责参数校验、调用服务层/模型层、返回 JSON 响应。
+## 总览
 
-## 文件结构
+| Blueprint | 前缀 | 文件 | 端点数 | 主要职责 |
+|-----------|------|------|--------|----------|
+| `auth_bp` | `/api/auth` | [auth.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/auth.py) | 5 | 注册、登录、用户资料 |
+| `games_bp` | `/api/games` | [games.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/games.py) | 9 | 棋谱 CRUD、上传、导出 |
+| `players_bp` | `/api/players` | [players.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/players.py) | 7 | 棋手档案、统计 |
+| `openings_bp` | `/api/openings` | [openings.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/openings.py) | 6 | 开局库、识别、相似 |
+| `analysis_bp` | `/api/analysis` | [analysis.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/analysis.py) | 6 | 同步/异步分析、任务 |
+| `practice_bp` | `/api/practice` | [practice.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/practice.py) | 15 | 残局、对弈、复盘 |
+| `collections_bp` | `/api/collections` | [collections.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/collections.py) | 5 | 收藏 |
+| `browsing_bp` | `/api/browsing` | [browsing.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/browsing.py) | 4 | 浏览历史 |
+| `tournaments_bp` | `/api/tournaments` | [tournaments.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/tournaments.py) | 6 | 赛事 |
+| `modification_bp` | `/api/modification-requests` | [modification_requests.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/modification_requests.py) | 4 | 修改申请 |
+| `traffic_bp` | `/api/admin` | [traffic.py](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/routes/traffic.py) | 10 | 流量监控、审核 |
 
-```
-routes/
-├── __init__.py      # Blueprint注册、首页路由、错误处理
-├── auth.py          # 认证模块 /api/auth
-├── games.py         # 棋谱管理 /api/games
-├── players.py       # 棋手管理 /api/players
-├── openings.py      # 开局管理 /api/openings
-├── analysis.py      # 分析管理 /api/analysis
-├── collections.py   # 收藏管理 /api/collections
-├── practice.py      # 练习管理 /api/practice
-└── browsing.py      # 浏览历史 /api/browsing
-```
-
-## 路由注册机制 (`__init__.py`)
-
-### 核心函数
-
-| 函数 | 说明 |
-|------|------|
-| `register_blueprints(app)` | 注册所有 Blueprint 到 Flask 应用 |
-| `register_index_route(app)` | 注册首页路由 `/`，返回系统状态和 API 列表 |
-| `register_error_handlers(app)` | 注册全局错误处理器（400/401/403/404/405/500） |
-
-### Blueprint 注册表
-
-| Blueprint | URL前缀 | 模块 |
-|-----------|---------|------|
-| `games_bp` | `/api/games` | 棋谱管理 |
-| `players_bp` | `/api/players` | 棋手管理 |
-| `analysis_bp` | `/api/analysis` | 分析管理 |
-| `openings_bp` | `/api/openings` | 开局管理 |
-| `auth_bp` | `/api/auth` | 认证管理 |
-| `collections_bp` | `/api/collections` | 收藏管理 |
-| `practice_bp` | `/api/practice` | 练习管理 |
-| `browsing_bp` | `/api/browsing` | 浏览历史 |
-
-### 全局错误处理
-
-所有错误统一返回 JSON 格式：`{"error": "错误类型", "detail": "详细信息"}`。500 错误自动执行 `db.session.rollback()` 防止数据库会话污染。
-
----
-
-## 模块详解
-
-### 1. auth.py — 认证模块 `/api/auth`
-
-| 端点 | 方法 | 认证 | 限流 | 说明 |
-|------|------|------|------|------|
-| `/register` | POST | 无 | 5次/分钟 | 用户注册 |
-| `/login` | POST | 无 | 10次/分钟 | 用户登录 |
-| `/logout` | POST | JWT | 无 | 用户登出 |
-| `/profile` | GET | JWT | 无 | 获取用户资料 |
-| `/profile` | PUT | JWT | 无 | 更新用户资料 |
-
-**核心逻辑**:
-- **注册**: 校验用户名(3-80字符)、邮箱格式、密码(>=6字符)，检查唯一性，创建用户并返回 JWT
-- **登录**: 验证用户名密码，返回 JWT 和用户信息
-- **更新资料**: 支持修改用户名、邮箱、密码（需验证旧密码）
-
----
-
-### 2. games.py — 棋谱管理 `/api/games`
-
-| 端点 | 方法 | 认证 | 限流 | 说明 |
-|------|------|------|------|------|
-| `/filters` | GET | 无 | 无 | 获取筛选选项（ECO代码、结果） |
-| `` | GET | 无 | 无 | 获取棋谱列表（分页+筛选+排序） |
-| `/<id>` | GET | 无 | 无 | 获取棋谱详情（含PGN和着法） |
-| `/upload` | POST | 无 | 10次/分钟 | 上传PGN文件导入 |
-| `/upload-pgn` | POST | 无 | 10次/分钟 | PGN文本导入 |
-| `/<id>` | PUT | JWT | 无 | 更新棋谱信息 |
-| `/<id>` | DELETE | JWT | 无 | 删除棋谱（级联删除分析） |
-| `/<id>/moves` | GET | 无 | 无 | 获取着法列表 |
-| `/<id>/analysis` | GET | 无 | 无 | 获取分析结果 |
-| `/<id>/analyze` | POST | JWT | 无 | 同步分析棋谱 |
-
-**核心逻辑**:
-- **列表查询**: 支持 player/eco/result/date_from/date_to/search 筛选，支持 created_at/date/elo/moves 排序
-- **上传**: 支持多文件上传，自动解析 PGN、创建棋手、识别开局，UTF-8/Latin-1 双编码兼容
-- **同步分析**: 调用 StockfishAnalyzer，深度上限 20，分析完成后保存 Analysis 记录
-
----
-
-### 3. players.py — 棋手管理 `/api/players`
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `/filters` | GET | 无 | 获取筛选选项（头衔、国家） |
-| `` | GET | 无 | 获取棋手列表（分页+筛选+排序） |
-| `/<id>` | GET | 无 | 获取棋手详情（含统计） |
-| `/<id>/games` | GET | 无 | 获取棋手对局列表（支持颜色/结果筛选） |
-| `/<id>/stats` | GET | 无 | 获取棋手统计（含ECO分类统计） |
-
-**核心逻辑**:
-- **列表查询**: 支持 search/country/title/min_elo/max_elo 筛选
-- **统计**: `get_stats()` 计算胜负和统计，`/stats` 额外计算 ECO 分类统计
-
----
-
-### 4. openings.py — 开局管理 `/api/openings`
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `` | GET | 无 | 获取开局列表（分页+筛选+排序） |
-| `/<eco>` | GET | 无 | 获取开局详情（含示例棋谱） |
-| `/identify` | POST | 无 | 识别开局（传入着法列表） |
-| `/tree` | GET | 无 | 获取开局分类树 |
-
-**核心逻辑**:
-- **识别开局**: 调用 `OpeningRecognizer.identify_opening()`，返回 ECO 代码、置信度、相似开局
-- **开局树**: 合并数据库开局和识别器内置开局数据
-- **详情**: 优先查数据库，fallback 到识别器内置数据，附加最近6局示例棋谱
-
----
-
-### 5. analysis.py — 分析管理 `/api/analysis`
-
-| 端点 | 方法 | 认证 | 限流 | 说明 |
-|------|------|------|------|------|
-| `/game/<id>/start` | POST | JWT | 5次/分钟 | 启动异步分析任务 |
-| `/game/<id>/status` | GET | JWT | 无 | 获取棋谱分析状态 |
-| `/tasks/<task_id>` | GET | 无 | 无 | 获取任务状态 |
-| `/tasks` | GET | 无 | 无 | 获取所有任务列表 |
-| `/tasks/<task_id>` | DELETE | 无 | 无 | 取消分析任务 |
-| `/engines` | GET | 无 | 无 | 获取引擎配置信息 |
-
-**核心逻辑**:
-- **异步分析**: 使用 `threading.Thread` 在后台执行分析，通过内存字典 `_analysis_tasks` 跟踪任务状态
-- **任务状态**: pending → running → completed/failed/cancelled
-- **进度回调**: `progress_callback` 实时更新分析进度
-- **取消支持**: 通过设置 `task['status'] = 'cancelled'` 和 `InterruptedError` 实现
-
----
-
-### 6. collections.py — 收藏管理 `/api/collections`
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `` | GET | JWT | 获取收藏列表（含棋谱摘要） |
-| `` | POST | JWT | 添加收藏（含备注） |
-| `/<id>` | DELETE | JWT | 删除收藏 |
-| `/check/<game_id>` | GET | JWT | 检查是否已收藏 |
-| `/<id>` | PUT | JWT | 更新收藏备注 |
-
-**核心逻辑**: 所有操作需 JWT 认证，通过 `get_jwt_identity()` 获取用户ID，确保只能操作自己的收藏。
-
----
-
-### 7. practice.py — 练习管理 `/api/practice`
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `/puzzles` | GET | 无 | 获取残局列表 |
-| `/puzzles/<id>` | GET | 无 | 获取残局详情 |
-| `/puzzles` | POST | JWT | 创建残局 |
-| `/puzzles/<id>` | DELETE | JWT | 删除残局 |
-| `/search_games` | GET | 无 | 搜索棋谱（用于"从棋谱开始"） |
-| `/start` | POST | JWT(optional) | 开始练习对局 |
-| `/move` | POST | 无 | 走子 |
-| `/undo` | POST | 无 | 悔棋 |
-| `/hint` | POST | 无 | 获取提示 |
-| `/resign` | POST | 无 | 认输 |
-| `/status/<session_id>` | GET | 无 | 获取对局状态 |
-| `/history` | GET | JWT(optional) | 获取练习历史 |
-| `/history/<id>` | GET | JWT(optional) | 获取练习详情 |
-| `/analyze/<id>` | POST | JWT(optional) | 启动练习复盘分析 |
-| `/analyze/<id>/status` | GET | JWT(optional) | 获取复盘分析状态 |
-| `/analyze/<id>/result` | GET | JWT(optional) | 获取复盘分析结果 |
-
-**核心逻辑**:
-- **会话管理**: 使用内存字典 `sessions` 存储活跃对局会话，key 为 UUID
-- **三种模式**: puzzle（残局）、from_game（从棋谱）、custom（自定义FEN）
-- **AI对弈**: 用户走子后 AI 自动应着，对局结束自动保存到数据库
-- **会话过期**: 返回 410 状态码和 `session_expired` 错误码
-- **复盘分析**: 异步分析练习对局的走法，使用独立的 `_practice_analysis_tasks` 字典
-
----
-
-### 8. browsing.py — 浏览历史 `/api/browsing`
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `` | GET | JWT | 获取浏览历史 |
-| `` | POST | JWT | 记录浏览（重复浏览更新时间） |
-| `/<game_id>` | DELETE | JWT | 删除单条记录 |
-| `/clear` | POST | JWT | 清空所有浏览历史 |
-
-**核心逻辑**: 重复浏览同一棋谱时更新 `viewed_at` 而非创建新记录，利用 `UniqueConstraint` 实现。
-
----
-
-## 通用设计模式
-
-### 1. 分页查询模式
+## 1. 认证 auth_bp
 
 ```python
-page = request.args.get('page', 1, type=int)
-per_page = request.args.get('per_page', 20, type=int)
-per_page = min(per_page, 100)  # 上限保护
-pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-return jsonify({'items': [...], 'total': pagination.total, 'page': page, 'per_page': per_page})
-```
+from flask import Blueprint
+auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
-### 2. 排序模式
-
-```python
-sort_map = {'created_at': Model.created_at, 'date': Model.date, ...}
-sort_col = sort_map.get(sort, Model.created_at)
-query = query.order_by(sort_col.desc() if order == 'desc' else sort_col.asc())
-```
-
-### 3. JWT 认证模式
-
-- 必须认证: `@jwt_required()`
-- 可选认证: `@jwt_required(optional=True)` — 游客也可访问，但功能受限
-- 获取用户: `get_jwt_identity()` 返回用户ID字符串
-
-### 4. 限流模式
-
-- 注册: `@limiter.limit("5 per minute")`
-- 登录: `@limiter.limit("10 per minute")`
-- 上传: `@limiter.limit("10 per minute")`
-- 分析: `@limiter.limit("5 per minute")`
-
-### 5. 错误处理模式
-
-```python
-try:
+@auth_bp.route('/register', methods=['POST'])
+def register():
+    """注册"""
+    data = request.get_json()
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'error': '用户名已存在'}), 409
+    user = User(username=data['username'], email=data['email'])
+    user.set_password(data['password'])
+    db.session.add(user)
     db.session.commit()
-except Exception as e:
-    db.session.rollback()
-    logger.error("Operation error: %s", e)
-    return jsonify({'error': 'Failed to ...'}), 500
+    return jsonify(user.to_dict()), 201
+
+@auth_bp.route('/login', methods=['POST'])
+@limiter.limit("100 per hour")
+def login():
+    """登录"""
+    data = request.get_json()
+    user = User.query.filter_by(username=data['username']).first()
+    if not user or not user.check_password(data['password']):
+        return jsonify({'error': '用户名或密码错误'}), 401
+    token = create_access_token(identity=user.id)
+    user.last_login_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'access_token': token, 'user': user.to_dict()}), 200
+
+@auth_bp.route('/me', methods=['GET'])
+@jwt_required()
+def get_me():
+    """当前用户"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    return jsonify(user.to_dict())
+
+@auth_bp.route('/change-password', methods=['POST'])
+@jwt_required()
+def change_password():
+    """修改密码"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    data = request.get_json()
+    if not user.check_password(data['old_password']):
+        return jsonify({'error': '原密码错误'}), 422
+    user.set_password(data['new_password'])
+    db.session.commit()
+    return jsonify({'message': '密码修改成功'}), 200
 ```
+
+**权限**：
+- `register` / `login` - 公开
+- `me` / `profile` / `change-password` - 用户
+
+## 2. 棋谱 games_bp
+
+```python
+games_bp = Blueprint('games', __name__, url_prefix='/api/games')
+
+@games_bp.route('/', methods=['GET'])
+@jwt_required(optional=True)
+def list_games():
+    """棋谱列表（分页、搜索、过滤）"""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    q = request.args.get('q', '')
+    eco = request.args.get('eco')
+
+    query = Game.query
+    if q:
+        query = query.join(Player, Game.white_player_id == Player.id).filter(
+            or_(Player.name.contains(q), Game.event.contains(q))
+        )
+    if eco:
+        query = query.filter(Game.eco_code == eco)
+
+    pagination = query.order_by(Game.date.desc()).paginate(page=page, per_page=per_page)
+    return jsonify({
+        'games': [g.to_dict() for g in pagination.items],
+        'total': pagination.total,
+        'page': page,
+        'per_page': per_page,
+    })
+
+@games_bp.route('/upload', methods=['POST'])
+@jwt_required()
+def upload_pgn():
+    """上传 PGN 文件批量导入"""
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': '请上传文件'}), 400
+
+    parser = PGNParser()
+    text = file.read().decode('utf-8', errors='ignore')
+    games, errors = parser.parse_multiple(text)
+
+    # 创建关联棋手
+    for g in games:
+        _ensure_player(g['white_player'])
+        _ensure_player(g['black_player'])
+
+    imported = len(Game.__bulk_insert([...]))
+    return jsonify({'imported': imported, 'errors': errors}), 201
+
+@games_bp.route('/<int:id>', methods=['DELETE'])
+@jwt_required()
+def delete_game(id):
+    """删除棋谱（提交审核或直接）"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if user.is_admin:
+        # 管理员直接删除
+        game = Game.query.get_or_404(id)
+        db.session.delete(game)
+        db.session.commit()
+        return jsonify({'message': '删除成功'})
+    else:
+        # 普通用户提交申请
+        req = ModificationRequest(
+            user_id=user_id,
+            target_type='game',
+            action='delete',
+            target_id=id,
+            reason=request.json.get('reason', ''),
+        )
+        db.session.add(req)
+        db.session.commit()
+        return jsonify({'message': '删除申请已提交', 'request_id': req.id}), 202
+```
+
+**关键设计**：
+- 危险操作（删除/修改）由 `ModificationRequest` 工作流保护
+- 管理员可绕过审核，普通用户需审批
+- PGN 上传支持批量导入，自动去重棋手
+
+## 3. 棋手 players_bp
+
+```python
+@players_bp.route('/<int:id>/stats', methods=['GET'])
+@jwt_required()
+def player_stats(id):
+    """棋手对局统计"""
+    player = Player.query.get_or_404(id)
+    white_games = Game.query.filter_by(white_player_id=id).all()
+    black_games = Game.query.filter_by(black_player_id=id).all()
+
+    wins_white = sum(1 for g in white_games if g.result == '1-0')
+    wins_black = sum(1 for g in black_games if g.result == '0-1')
+    draws = sum(1 for g in white_games + black_games if g.result == '1/2-1/2')
+
+    return jsonify({
+        'total_games': len(white_games) + len(black_games),
+        'wins_as_white': wins_white,
+        'wins_as_black': wins_black,
+        'draws': draws,
+        'win_rate': (wins_white + wins_black) / max(1, len(white_games) + len(black_games)),
+        'favorite_openings': _player_favorite_openings(id),
+    })
+```
+
+## 4. 开局 openings_bp
+
+```python
+@openings_bp.route('/rec', methods=['GET'])
+@jwt_required()
+def recognize_opening():
+    """识别开局（输入 moves 列表）"""
+    moves = request.args.getlist('moves')  # ['e4', 'e5', 'Nf3']
+    recognizer = OpeningRecognizer()
+    opening = recognizer.recognize(moves)
+    if not opening:
+        return jsonify({'eco_code': None, 'name': 'Unknown'}), 200
+    return jsonify(opening.to_dict())
+
+@openings_bp.route('/tree', methods=['GET'])
+@jwt_required()
+def opening_tree():
+    """开局树（前 N 步）"""
+    max_depth = request.args.get('depth', 6, type=int)
+    tree = OpeningRecognizer().build_tree(max_depth)
+    return jsonify({'tree': tree})
+```
+
+**识别算法**：
+- 加载 `openings` 表，遍历每条记录的 `moves` JSON
+- 与输入 moves 列表前缀匹配
+- 返回最长匹配项
+
+## 5. 分析 analysis_bp
+
+```python
+@analysis_bp.route('/async', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per hour")
+def async_analysis():
+    """提交异步分析任务"""
+    data = request.get_json()
+    user_id = get_jwt_identity()
+
+    task = AnalysisTask(
+        id=str(uuid.uuid4()),
+        game_id=data['game_id'],
+        user_id=user_id,
+        status='pending',
+        depth=data.get('depth', 20),
+        threads=data.get('threads', 1),
+    )
+    db.session.add(task)
+    db.session.commit()
+
+    # 启动后台线程
+    threading.Thread(
+        target=run_analysis_task,
+        args=(app, task.id),
+        daemon=True
+    ).start()
+
+    return jsonify({'task_id': task.id, 'status': 'pending'}), 202
+
+@analysis_bp.route('/tasks/<task_id>', methods=['GET'])
+@jwt_required()
+def get_task(task_id):
+    """查询任务状态"""
+    task = AnalysisTask.query.get_or_404(task_id)
+    user_id = get_jwt_identity()
+    if task.user_id != user_id and not User.query.get(user_id).is_admin:
+        return jsonify({'error': '无权访问'}), 403
+    return jsonify(task.to_dict())
+```
+
+**后台任务实现** `run_analysis_task`：
+
+```python
+def run_analysis_task(app, task_id):
+    """后台线程执行分析"""
+    with app.app_context():
+        task = AnalysisTask.query.get(task_id)
+        task.status = 'running'
+        db.session.commit()
+
+        try:
+            analyzer = StockfishAnalyzer()
+            game = Game.query.get(task.game_id)
+            result = asyncio.run(analyzer.analyze_game(
+                game.pgn_content,
+                depth=task.depth,
+                threads=task.threads,
+            ))
+
+            # 写 analyses 表
+            analysis = Analysis(
+                game_id=task.game_id,
+                analysis_data=result,
+                depth=task.depth,
+            )
+            db.session.add(analysis)
+
+            task.status = 'completed'
+            task.progress = 100
+            task.result = {'analysis_id': analysis.id}
+            db.session.commit()
+        except Exception as e:
+            task.status = 'failed'
+            task.error_message = str(e)
+            db.session.commit()
+```
+
+## 6. 练习 practice_bp
+
+```python
+@practice_bp.route('/games', methods=['POST'])
+@jwt_required()
+def start_practice():
+    """开始练习对局"""
+    data = request.get_json()
+    user_id = get_jwt_identity()
+
+    pg = PracticeGame(
+        user_id=user_id,
+        mode=data['mode'],                      # ai / puzzle / game
+        difficulty=data.get('difficulty'),
+        puzzle_id=data.get('puzzle_id'),
+        starting_fen=data.get('starting_fen'),
+        user_color=data.get('user_color', 'white'),
+        result='ongoing',
+    )
+    db.session.add(pg)
+    db.session.commit()
+
+    return jsonify(pg.to_dict()), 201
+
+@practice_bp.route('/games/<int:id>/moves', methods=['POST'])
+@jwt_required()
+def make_move(id):
+    """提交着法"""
+    pg = PracticeGame.query.get_or_404(id)
+    if pg.user_id != get_jwt_identity():
+        return jsonify({'error': '无权操作'}), 403
+
+    data = request.get_json()
+    move_san = data['move']  # SAN 格式
+    want_ai = data.get('ai_response', True)
+
+    # 应用玩家着法
+    board = chess.Board(pg.current_fen())
+    move = board.parse_san(move_san)
+    board.push(move)
+    user_move = {'san': move_san, 'fen_after': board.fen()}
+
+    # AI 回手
+    ai_move = None
+    if want_ai and not board.is_game_over():
+        ai = AIPlayer(difficulty=pg.difficulty)
+        ai_move_obj, eval_score = ai.get_move(board)
+        board.push(ai_move_obj)
+        ai_move = {
+            'san': board.san(ai_move_obj),
+            'fen_after': board.fen(),
+            'evaluation': eval_score,
+        }
+
+    # 落库
+    moves = pg.moves_json or []
+    moves.append({'user': user_move, 'ai': ai_move})
+    pg.moves_json = moves
+    pg.current_fen = board.fen()
+    if board.is_game_over():
+        pg.result = _determine_result(board, pg.user_color)
+        pg.ended_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        'user_move': user_move,
+        'ai_move': ai_move,
+        'status': pg.result,
+    })
+
+@practice_bp.route('/games/<int:id>/review', methods=['GET'])
+@jwt_required()
+def review(id):
+    """获取复盘分析"""
+    pg = PracticeGame.query.get_or_404(id)
+    if not pg.review_data:
+        # 触发分析
+        analyzer = StockfishAnalyzer()
+        review = asyncio.run(analyzer.review_game(pg.moves_json, pg.user_color))
+        pg.review_data = review
+        db.session.commit()
+    return jsonify(pg.review_data)
+```
+
+**复盘评价算法**（基于胜率变化）：
+
+```python
+def label_move(win_rate_delta):
+    if win_rate_delta > 0.20:   return ('brilliant', '妙手')
+    if win_rate_delta > 0.05:   return ('good',       '好着')
+    if win_rate_delta > -0.05:  return ('neutral',    '中规中矩')
+    if win_rate_delta > -0.20:  return ('inaccuracy', '失误')
+    return ('blunder', '漏着')
+```
+
+## 7. 收藏 collections_bp
+
+```python
+@collections_bp.route('/', methods=['POST'])
+@jwt_required()
+def add_collection():
+    """添加收藏（防重复）"""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    existing = Collection.query.filter_by(
+        user_id=user_id, game_id=data['game_id']
+    ).first()
+    if existing:
+        return jsonify({'error': '已经收藏过了'}), 409
+
+    c = Collection(
+        user_id=user_id,
+        game_id=data['game_id'],
+        note=data.get('note', ''),
+    )
+    db.session.add(c)
+    db.session.commit()
+    return jsonify(c.to_dict()), 201
+```
+
+**唯一约束** `(user_id, game_id)` 防止重复。
+
+## 8. 浏览历史 browsing_bp
+
+```python
+@browsing_bp.route('/', methods=['POST'])
+@jwt_required()
+def record():
+    """记录浏览（重复浏览刷新时间）"""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    h = BrowsingHistory.query.filter_by(
+        user_id=user_id, game_id=data['game_id']
+    ).first()
+    if h:
+        h.viewed_at = datetime.utcnow()
+    else:
+        h = BrowsingHistory(
+            user_id=user_id,
+            game_id=data['game_id'],
+        )
+        db.session.add(h)
+    db.session.commit()
+    return jsonify(h.to_dict())
+```
+
+## 9. 赛事 tournaments_bp
+
+参见完整 API 文档。
+
+## 10. 修改审核 modification_bp
+
+```python
+@modification_bp.route('/', methods=['POST'])
+@jwt_required()
+def create_request():
+    """提交修改申请"""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    req = ModificationRequest(
+        user_id=user_id,
+        target_type=data['target_type'],
+        target_id=data['target_id'],
+        action=data['action'],
+        payload_json=json.dumps(data.get('payload', {})),
+        reason=data.get('reason', ''),
+        status='pending',
+    )
+    db.session.add(req)
+    db.session.commit()
+    return jsonify(req.to_dict()), 201
+```
+
+## 11. 管理 traffic_bp
+
+```python
+traffic_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
+
+@traffic_bp.route('/traffic', methods=['GET'])
+@admin_required
+def traffic_summary():
+    """流量统计"""
+    total = ApiAccessLog.query.count()
+    error_count = ApiAccessLog.query.filter(ApiAccessLog.status_code >= 400).count()
+    avg_duration = db.session.query(func.avg(ApiAccessLog.duration_ms)).scalar() or 0
+
+    # Top endpoints
+    top_paths = db.session.query(
+        ApiAccessLog.path, func.count(ApiAccessLog.id)
+    ).group_by(ApiAccessLog.path).order_by(func.count(ApiAccessLog.id).desc()).limit(10).all()
+
+    return jsonify({
+        'summary': {
+            'total_requests': total,
+            'error_rate': error_count / max(1, total),
+            'avg_duration_ms': int(avg_duration),
+        },
+        'top_endpoints': [{'path': p, 'count': c} for p, c in top_paths],
+    })
+
+@traffic_bp.route('/requests/<int:id>/approve', methods=['POST'])
+@admin_required
+def approve_request(id):
+    """通过申请"""
+    req = ModificationRequest.query.get_or_404(id)
+    if req.status != 'pending':
+        return jsonify({'error': '该申请已处理'}), 409
+
+    # 执行业务
+    try:
+        _execute_modification(req)
+        req.status = 'approved'
+        req.reviewer_id = get_jwt_identity()
+        req.review_comment = request.json.get('comment', '')
+        req.reviewed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'message': '已通过', 'request': req.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+```
+
+`admin_required` 装饰器：
+
+```python
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        if not user or not user.is_admin:
+            return jsonify({'error': '需要管理员权限'}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+```
+
+## 注册入口
+
+```python
+# app/__init__.py
+def register_blueprints(app):
+    from app.routes.auth import auth_bp
+    from app.routes.games import games_bp
+    from app.routes.players import players_bp
+    from app.routes.openings import openings_bp
+    from app.routes.analysis import analysis_bp
+    from app.routes.practice import practice_bp
+    from app.routes.collections import collections_bp
+    from app.routes.browsing import browsing_bp
+    from app.routes.tournaments import tournaments_bp
+    from app.routes.modification_requests import modification_bp
+    from app.routes.traffic import traffic_bp
+
+    for bp in [auth_bp, games_bp, players_bp, openings_bp,
+               analysis_bp, practice_bp, collections_bp, browsing_bp,
+               tournaments_bp, modification_bp, traffic_bp]:
+        app.register_blueprint(bp)
+```
+
+## 路由清单
+
+总计约 75 个端点。可通过 `flask routes` 命令查看完整列表。

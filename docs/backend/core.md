@@ -1,219 +1,390 @@
-# 后端核心层 (`backend/app/` + `backend/config.py` + `backend/app/admin.py` + `backend/app/utils/`)
+# 核心层（Core）
 
-## 概述
+> 应用工厂、配置加载、扩展注册、CLI 入口、CORS、限流等核心设施。
 
-核心层包含应用工厂、配置管理、后台管理和工具函数，是整个后端应用的骨架和基础设施。
+## 1. 应用工厂 `create_app()`
 
-## 文件结构
+文件：[`backend/app/__init__.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/__init__.py)
 
+```python
+def create_app(config_name=None):
+    app = Flask(__name__)
+    app.config.from_object(load_config(config_name))
+
+    # 1. 数据库
+    db.init_app(app)
+    migrate.init_app(app, db)
+
+    # 2. 认证
+    jwt.init_app(app)
+    jwt.token_in_blocklist_loader(load_jwt_blocklist)
+
+    # 3. 跨域
+    cors.init_app(app, resources={
+        r"/api/*": {"origins": app.config['CORS_ORIGINS'].split(',')}
+    })
+
+    # 4. 限流
+    limiter.init_app(app)
+    limiter._storage_uri = app.config.get('RATELIMIT_STORAGE_URI', 'memory://')
+
+    # 5. 管理后台
+    admin.init_app(app)
+
+    # 6. 注册路由
+    register_blueprints(app)
+
+    # 7. 流量中间件
+    init_traffic_middleware(app)
+
+    # 8. Swagger
+    init_swagger(app)
+
+    return app
 ```
-backend/
-├── config.py              # 应用配置（多环境）
-├── app/
-│   ├── __init__.py        # 应用工厂 + 扩展初始化
-│   ├── admin.py           # Flask-Admin 后台管理
-│   ├── swagger_config.py  # Swagger API 文档配置
-│   └── utils/
-│       ├── __init__.py    # 空初始化
-│       └── validators.py  # 验证器（空文件，预留）
-```
 
----
+**关键扩展**：
 
-## 1. 应用工厂 (`app/__init__.py`)
-
-### `create_app(config_name='default')`
-
-Flask 应用工厂模式，负责创建和配置 Flask 应用实例。
-
-**初始化流程**:
-
-```
-1. 创建 Flask 应用实例
-2. 加载配置（根据 config_name 选择配置类）
-3. 初始化扩展：
-   ├── SQLAlchemy (db)     — ORM 数据库
-   ├── Migrate (migrate)   — 数据库迁移
-   ├── CORS                — 跨域支持
-   ├── JWTManager (jwt)    — JWT 认证
-   └── Limiter (limiter)   — API 限流
-4. 注册 Blueprint 和错误处理器
-5. 配置 Swagger API 文档
-6. 配置 Flask-Admin 后台
-7. 创建数据库表 + 初始化预设残局
-```
-
-### 全局扩展实例
-
-| 实例 | 说明 | 默认配置 |
+| 扩展 | 作用 | 关键配置 |
 |------|------|----------|
-| `db` | SQLAlchemy ORM | pool_recycle=3600, pool_pre_ping=True |
-| `migrate` | Flask-Migrate | 绑定 db 实例 |
-| `jwt` | JWT 认证 | 过期时间 86400秒(24小时) |
-| `limiter` | API 限流 | 2000次/天, 500次/小时, memory存储 |
+| `db` (SQLAlchemy) | ORM | `SQLALCHEMY_DATABASE_URI`, `pool_recycle=3600` |
+| `migrate` (Alembic) | 迁移 | `migrations/` |
+| `jwt` (Flask-JWT-Extended) | JWT | `JWT_SECRET_KEY`, `JWT_ACCESS_TOKEN_EXPIRES=24h` |
+| `cors` (Flask-CORS) | 跨域 | `CORS_ORIGINS` |
+| `limiter` (Flask-Limiter) | 限流 | `RATELIMIT_*` |
+| `admin` (Flask-Admin) | 后台 | `ADMIN_*` |
+| `swagger` (Flasgger) | API 文档 | `/apispec_1.json` |
 
-### CORS 配置
+## 2. 配置层 `config.py`
 
-```python
-CORS(app, resources={r"/api/*": {"origins": "*"}})
-```
+文件：[`backend/config.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/config.py)
 
-仅对 `/api/` 路径启用 CORS，允许所有来源访问。
-
----
-
-## 2. 配置管理 (`config.py`)
-
-### 配置类层次
-
-```
-Config (基类)
-├── DevelopmentConfig  — 开发环境
-├── ProductionConfig   — 生产环境
-└── TestingConfig      — 测试环境
-```
-
-### 基类配置 (`Config`)
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `SECRET_KEY` | `dev-secret-key-change-in-production` | Flask 密钥（环境变量覆盖） |
-| `SQLALCHEMY_TRACK_MODIFICATIONS` | False | 关闭修改追踪 |
-| `JWT_SECRET_KEY` | `jwt-dev-secret-key` | JWT 密钥（环境变量覆盖） |
-| `JWT_ACCESS_TOKEN_EXPIRES` | 86400 | JWT 有效期(秒) |
-| `STOCKFISH_PATH` | `backend/stockfish/stockfish/stockfish-windows-x86-64-avx2.exe` | Stockfish 路径 |
-| `ANALYSIS_DEPTH` | 20 | 分析深度 |
-| `ANALYSIS_TIMEOUT` | 300 | 分析超时(秒) |
-| `ANALYSIS_THREADS` | 1 | 分析线程数 |
-| `ANALYSIS_HASH` | 256 | 分析哈希表(MB) |
-| `UPLOAD_FOLDER` | `backend/uploads` | 上传目录 |
-| `MAX_CONTENT_LENGTH` | 16MB | 上传文件大小限制 |
-
-### 环境差异
-
-| 配置项 | Development | Production | Testing |
-|--------|-------------|------------|---------|
-| `DEBUG` | True | False | - |
-| `TESTING` | - | - | True |
-| `SQLALCHEMY_DATABASE_URI` | `sqlite:///chessdb.db` | `sqlite:///chessdb.db` | `sqlite:///test_chess.db` |
-| `WTF_CSRF_ENABLED` | - | - | False |
-
-### 配置选择
+### 2.1 核心类
 
 ```python
-config = {
-    'development': DevelopmentConfig,
-    'production': ProductionConfig,
-    'testing': TestingConfig,
-    'default': DevelopmentConfig,
+class Config:
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-secret-key')
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
+
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
+        'sqlite:///' + os.path.join(BASE_DIR, 'chessdb.db')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+    }
+
+    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '*')
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', './uploads')
+    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+
+    # Stockfish 引擎
+    STOCKFISH_PATH = os.environ.get('STOCKFISH_PATH') or _resolve_stockfish_path()
+    ANALYSIS_DEPTH = int(os.environ.get('ANALYSIS_DEPTH', 20))
+    ANALYSIS_THREADS = int(os.environ.get('ANALYSIS_THREADS', 1))
+    ANALYSIS_HASH = int(os.environ.get('ANALYSIS_HASH', 256))
+    ANALYSIS_TIMEOUT = int(os.environ.get('ANALYSIS_TIMEOUT', 300))
+
+class DevelopmentConfig(Config):
+    DEBUG = True
+
+class ProductionConfig(Config):
+    DEBUG = False
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', Config.SQLALCHEMY_DATABASE_URI)
+
+class TestingConfig(Config):
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+```
+
+### 2.2 Stockfish 路径解析（4 级回退）
+
+```python
+def _resolve_stockfish_path():
+    # 1. 环境变量 STOCKFISH_PATH
+    if env_path := os.environ.get('STOCKFISH_PATH'):
+        if os.path.isfile(env_path):
+            return env_path
+
+    # 2. STOCKFISH_BASE_DIR 拼接常见路径
+    base_dir = _resolve_base_dir()
+    candidates = [
+        os.path.join(base_dir, 'stockfish', 'stockfish-windows-x86_64-avx2.exe'),
+        os.path.join(base_dir, 'stockfish', 'stockfish.exe'),
+        os.path.join(base_dir, 'Stockfish', 'stockfish-windows-x86_64-avx2.exe'),
+    ]
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    # 3. Windows 常见路径
+    if sys.platform == 'win32':
+        win_paths = [
+            r'C:\Program Files\Stockfish\stockfish.exe',
+            r'C:\Program Files (x86)\Stockfish\stockfish.exe',
+            os.path.expanduser('~\\AppData\\Local\\Programs\\stockfish\\stockfish.exe'),
+        ]
+        for p in win_paths:
+            if os.path.isfile(p):
+                return p
+
+    # 4. Linux 默认安装
+    return '/usr/bin/stockfish' if sys.platform == 'linux' else None
+```
+
+### 2.3 基础目录解析（解决 Windows junction / OneDrive）
+
+```python
+def _resolve_base_dir():
+    # 1. 环境变量
+    if env_dir := os.environ.get('STOCKFISH_BASE_DIR'):
+        return env_dir
+
+    # 2. __file__ 绝对路径
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        pass
+
+    # 3. 当前工作目录
+    try:
+        return os.path.abspath(os.getcwd())
+    except OSError:
+        pass
+
+    # 4. sys.argv[0] 推导
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+```
+
+## 3. 入口与 CLI
+
+文件：[`backend/run.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/run.py)
+
+```python
+from app import create_app, db
+from app.models import *
+
+app = create_app(os.environ.get('FLASK_ENV', 'development'))
+
+@app.shell_context_processor
+def make_shell_context():
+    return {'db': db, 'User': User, 'Game': Game, ...}
+
+# CLI 命令
+@app.cli.command('init-db')
+def init_db():
+    """初始化数据库 + 种子数据"""
+    from init_db import init_database
+    init_database(app)
+
+@app.cli.command('seed-data')
+def seed_data():
+    """重新灌入种子"""
+    from init_db import seed_data
+    seed_data(app)
+
+@app.cli.command('backup-db')
+def backup_db():
+    """备份数据库到 backups/ 目录"""
+    from app.utils import backup_database
+    backup_database(app)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+```
+
+**常用命令**：
+
+```bash
+flask init-db              # 初始化 + 种子
+flask seed-data            # 重新灌入种子
+flask backup-db            # 备份数据库
+flask db migrate -m "..."  # 生成迁移
+flask db upgrade           # 应用迁移
+flask routes               # 列出所有路由
+```
+
+## 4. 流量中间件
+
+文件：[`backend/app/traffic.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/traffic.py)
+
+```python
+def init_traffic_middleware(app):
+    @app.before_request
+    def before_request():
+        g.request_start_time = time.time()
+
+    @app.after_request
+    def after_request(response):
+        if request.path.startswith('/api/') and request.method in ['POST', 'PUT', 'DELETE']:
+            try:
+                duration = int((time.time() - g.request_start_time) * 1000)
+                log = ApiAccessLog(
+                    method=request.method,
+                    path=request.path[:500],
+                    status_code=response.status_code,
+                    duration_ms=duration,
+                    ip_address=request.remote_addr,
+                    user_agent=request.user_agent.string[:500],
+                )
+                # 提取 JWT 用户
+                try:
+                    verify_jwt_in_request(optional=True)
+                    user_id = get_jwt_identity()
+                    if user_id:
+                        user = User.query.get(user_id)
+                        if user:
+                            log.user_id = user_id
+                            log.username = user.username
+                except Exception:
+                    pass
+                db.session.add(log)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        return response
+```
+
+**记录范围**：只记录 `POST/PUT/DELETE` 的 `/api/*` 请求，避免 `GET` 写入风暴。
+
+## 5. CORS 策略
+
+```python
+cors.init_app(app, resources={
+    r"/api/*": {
+        "origins": app.config['CORS_ORIGINS'].split(','),
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True,
+    }
+})
+```
+
+**生产推荐**：
+```
+CORS_ORIGINS=https://your-domain.vercel.app,https://admin.your-domain.com
+```
+
+**开发**：
+```
+CORS_ORIGINS=*
+```
+
+**绕过方案**：Vercel `vercel.json` 用 `routes` 反代 `/api/*` 到后端，可避免 CORS。
+
+## 6. 限流策略
+
+```python
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["2000 per day", "500 per hour"],
+    storage_uri="memory://",
+)
+
+# 特殊限流
+@auth_bp.route('/login', methods=['POST'])
+@limiter.limit("100 per hour")
+def login():
+    ...
+
+@analysis_bp.route('/async', methods=['POST'])
+@limiter.limit("10 per hour")
+def async_analysis():
+    ...
+```
+
+**多 worker 注意**：`memory://` 仅对单进程生效，gunicorn 4 worker 会放大 4 倍。生产推荐 `redis://`：
+
+```
+RATELIMIT_STORAGE_URI=redis://redis:6379/0
+```
+
+## 7. JWT 策略
+
+```python
+jwt = JWTManager(app)
+
+@jwt.token_in_blocklist_loader
+def load_blocklist(jwt_header, jwt_payload):
+    jti = jwt_payload['jti']
+    return RevokedToken.is_revoked(jti)
+
+@jwt.expired_token_loader
+def expired_token(jwt_header, jwt_payload):
+    return jsonify({'error': 'Token已过期', 'code': 'TOKEN_EXPIRED'}), 401
+
+@jwt.unauthorized_loader
+def unauthorized(callback):
+    return jsonify({'error': '缺少Token', 'code': 'UNAUTHORIZED'}), 401
+```
+
+**关键点**：
+- 24h 有效期（`JWT_ACCESS_TOKEN_EXPIRES`）
+- 支持可选认证 `@jwt_required(optional=True)`（浏览历史/收藏时区分用户）
+- Blocklist 支持（主动吊销 token）
+
+## 8. Swagger 配置
+
+文件：[`backend/app/swagger_config.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/swagger_config.py)
+
+```python
+swagger_config = {
+    "headers": [],
+    "specs": [{
+        "endpoint": 'apispec_1',
+        "route": '/apispec_1.json',
+        "rule_filter": lambda rule: True,
+        "model_filter": lambda tag: True,
+    }],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/apidocs/",
 }
-```
-
-通过 `create_app(config_name)` 参数或 `FLASK_ENV` 环境变量选择配置。
-
----
-
-## 3. 后台管理 (`app/admin.py`)
-
-### Flask-Admin 配置
-
-**访问路径**: `/admin/`
-
-### 管理视图
-
-| 视图类 | 模型 | 名称 | 特殊配置 |
-|--------|------|------|----------|
-| `UserAdmin` | User | 用户 | form: username/email/is_admin; 列表: id/username/email/is_admin/created_at |
-| `GameAdmin` | Game | 棋谱 | 过滤: result/eco_code/date; 搜索: opening_name |
-| `PlayerAdmin` | Player | 棋手 | 搜索: name |
-| `OpeningAdmin` | Opening | 开局库 | 搜索: name/eco_code |
-| `SecureModelView` | Analysis | 分析 | 默认配置 |
-| `SecureModelView` | Puzzle | 残局 | 默认配置 |
-| `SecureModelView` | PracticeGame | 练习历史 | 默认配置 |
-| `SecureModelView` | Collection | 收藏 | 默认配置 |
-| `SecureModelView` | BrowsingHistory | 浏览历史 | 默认配置 |
-
-### 基类 `SecureModelView`
-
-| 配置项 | 值 | 说明 |
-|--------|-----|------|
-| `column_display_pk` | True | 显示主键 |
-| `column_hide_backrefs` | False | 显示反向引用 |
-| `page_size` | 20 | 每页数量 |
-| `can_export` | True | 允许导出 |
-
-**设计要点**: 当前未实现管理员认证保护，生产环境需添加 `is_accessible()` 方法限制访问。
-
----
-
-## 4. Swagger API 文档 (`app/swagger_config.py`)
-
-### 配置
-
-```python
 swagger_template = {
     "info": {
-        "title": "Chess Data Management API",
-        "description": "国际象棋数据管理系统API文档",
-        "version": "1.0.0"
+        "title": "ChessDB API",
+        "version": "1.0.0",
+        "description": "国际象棋数据管理与训练系统 API 文档",
     },
     "securityDefinitions": {
         "Bearer": {
             "type": "apiKey",
             "name": "Authorization",
-            "in": "header"
+            "in": "header",
         }
-    }
+    },
 }
 ```
 
-**访问路径**: `/apidocs/` 或 `/flasgger/`
+**访问**：`http://localhost:5000/apidocs`
 
-**设计要点**: 所有路由函数的 docstring 遵循 Swagger/OpenAPI 规范格式，Flasgger 自动提取生成文档。
+## 9. 错误处理
 
----
+全局错误处理（在 `create_app` 中注册）：
 
-## 5. 工具函数 (`app/utils/`)
+```python
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({'error': str(e), 'code': 'BAD_REQUEST'}), 400
 
-### validators.py
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': '资源不存在', 'code': 'NOT_FOUND'}), 404
 
-当前为空文件，预留用于未来添加：
-- PGN 格式验证器
-- FEN 字符串验证器
-- 用户输入校验器
-- 文件类型验证器
-
-当前验证逻辑分散在路由层（如 `auth.py` 中的邮箱正则验证、用户名长度校验）。
-
----
-
-## 应用启动流程
-
-```
-1. create_app(config_name)
-2. ├── 加载配置
-3. ├── 初始化扩展 (db, migrate, CORS, jwt, limiter)
-4. ├── 注册 Blueprint (8个API模块)
-5. ├── 注册错误处理器 (6种HTTP错误)
-6. ├── 配置 Swagger
-7. ├── 配置 Flask-Admin
-8. └── 应用上下文:
-     ├── 导入所有模型 (确保表创建)
-     ├── db.create_all() (创建表)
-     └── init_system_puzzles() (初始化预设残局)
+@app.errorhandler(500)
+def server_error(e):
+    db.session.rollback()
+    return jsonify({'error': '服务器内部错误', 'code': 'INTERNAL_ERROR'}), 500
 ```
 
-## 环境变量
+## 10. 工具与验证器
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `SECRET_KEY` | Flask 密钥 | `dev-secret-key-change-in-production` |
-| `JWT_SECRET_KEY` | JWT 签名密钥 | `jwt-dev-secret-key` |
-| `DATABASE_URI` | 数据库连接字符串 | `sqlite:///chessdb.db` |
-| `STOCKFISH_PATH` | Stockfish 可执行文件路径 | 项目内置路径 |
-| `ANALYSIS_DEPTH` | 分析深度 | 20 |
-| `ANALYSIS_TIMEOUT` | 分析超时 | 300 |
-| `ANALYSIS_THREADS` | 分析线程数 | 1 |
-| `ANALYSIS_HASH` | 分析哈希表大小 | 256 |
-| `UPLOAD_FOLDER` | 上传目录 | `backend/uploads` |
-| `FLASK_ENV` | 运行环境 | development |
+文件：[`backend/app/utils/validators.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/utils/validators.py)
+
+- `validate_email(email)`
+- `validate_password(password)` - 至少 8 位、含字母数字
+- `validate_fen(fen)` - 6 段 FEN 格式
+- `validate_pgn(pgn)` - PGN 合法性
+- `sanitize_input(text)` - XSS 防护

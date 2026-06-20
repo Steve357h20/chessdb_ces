@@ -1,313 +1,363 @@
-# 后端数据模型层 (`backend/app/models/`)
+# 数据模型层（Models）
 
-## 概述
+> 文件位置：`backend/app/models/`，统一通过 `app/models/__init__.py` 导出。
+> ORM 框架：SQLAlchemy 3.x + Flask-Migrate（Alembic）。
+> 数据库：开发用 SQLite，生产可一键切换 PostgreSQL。
 
-数据模型层定义了系统的所有数据库表结构，基于 SQLAlchemy ORM 实现。所有模型继承自 `db.Model`，统一通过 `app/__init__.py` 中的 `db = SQLAlchemy()` 实例管理。模型间通过外键和关系建立关联，支持 JSON 字段存储复杂数据结构。
-
-## 文件结构
+## 模型全景
 
 ```
-models/
-├── __init__.py          # 模型注册与导出
-├── user.py              # 用户模型
-├── player.py            # 棋手模型
-├── game.py              # 棋谱模型
-├── tournament.py        # 赛事模型
-├── analysis.py          # 分析结果模型
-├── opening.py           # 开局库模型
-├── collection.py        # 收藏模型
-├── practice.py          # 练习相关模型（PracticeGame + Puzzle）
-└── browsing_history.py  # 浏览历史模型
+┌──────────────────────────────────────────────────────────────────┐
+│  核心数据                                                          │
+│  ┌───────┐   ┌────────┐   ┌────────────┐   ┌──────┐              │
+│  │ users │   │players │   │tournaments │   │games │              │
+│  └───┬───┘   └───┬────┘   └─────┬──────┘   └──┬───┘              │
+│      │           │              │              │                  │
+│      │           │              │              │                  │
+│  ┌───┴───────────┴──────────────┴──────────────┴─────┐            │
+│  │                  user-level data                  │            │
+│  └────────────────────────┬─────────────────────────┘            │
+│  ┌────────────────────┐  │  ┌──────────────────────┐              │
+│  │ collections        │──┼──│ browsing_history     │              │
+│  └────────────────────┘  │  └──────────────────────┘              │
+│                           │                                       │
+│  ┌─────────────────┐  ┌───┴────────┐  ┌─────────────────┐         │
+│  │ analyses        │──│ analysis_  │  │ openings        │         │
+│  │ (1:1 game)      │  │ tasks (1:N)│  │ (独立预定义)     │         │
+│  └─────────────────┘  └────────────┘  └─────────────────┘         │
+│  ┌─────────────────┐  ┌─────────────────┐                          │
+│  │ puzzles         │──│ practice_games  │                          │
+│  └─────────────────┘  └─────────────────┘                          │
+│                                                                     │
+│  管理扩展                                                            │
+│  ┌────────────────────┐  ┌──────────────────────┐                  │
+│  │ modification_      │  │ api_access_logs      │                  │
+│  │ requests           │  │                      │                  │
+│  └────────────────────┘  └──────────────────────┘                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## 模型详解
+## 通用约定
 
-### 1. User — 用户模型
+- 主键统一为 `id = db.Column(db.Integer, primary_key=True)`
+- 时间字段：`created_at` / `updated_at`（自动维护）
+- 关系命名：单数 `game` / 复数 `games`（避免命名冲突）
+- 软删除：未启用，使用真删除 + 审核机制
+- 索引：所有外键、状态字段、`is_preset` 等枚举字段都加索引
 
-**文件**: `user.py` | **表名**: `users`
+## 详细表结构
 
-| 字段 | 类型 | 约束 | 说明 |
+### 1. `users`（用户）
+
+文件：[`backend/app/models/user.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/user.py)
+
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 用户ID |
-| `username` | String(80) | UNIQUE, NOT NULL, 索引 | 用户名 |
-| `password_hash` | String(256) | NOT NULL | 密码哈希（werkzeug） |
-| `email` | String(120) | UNIQUE, NOT NULL, 索引 | 邮箱 |
-| `is_admin` | Boolean | 默认 False | 是否管理员 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | ✓ | |
+| username | String(80) | ✓ unique | 用户名 |
+| email | String(120) | ✓ unique | 邮箱 |
+| password_hash | String(255) | | PBKDF2 哈希 |
+| nickname | String(80) | | 显示昵称 |
+| is_admin | Boolean | ✓ | 管理员标识 |
+| avatar_url | String(500) | | 头像 |
+| last_login_at | DateTime | | 最后登录时间 |
+| is_active | Boolean | ✓ | 是否启用 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**关系**:
-- `collections` → Collection（一对多，dynamic lazy）
+**关系**：
+- `games` → 棋手（反向 `backref`）
+- `collections` → 收藏
+- `browsing_history` → 历史
+- `practice_games` → 练习
+- `puzzles_created` → 残局题
+- `modification_requests` → 申请
+- `reviewed_requests` → 审核记录
 
-**方法**:
-- `set_password(password)` — 使用 `generate_password_hash` 设置密码哈希
-- `check_password(password)` — 使用 `check_password_hash` 验证密码
-- `to_dict()` — 序列化为字典（不含密码哈希）
+**方法**：
+- `set_password(password)` - 设置密码
+- `check_password(password)` - 验证密码
+- `to_dict()` - 序列化（不包含 hash）
 
-**设计要点**: 密码不存储明文，使用 werkzeug 的 PBKDF2 哈希算法。`is_admin` 字段用于 Flask-Admin 后台权限控制。
+### 2. `players`（棋手）
 
----
+文件：[`backend/app/models/player.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/player.py)
 
-### 2. Player — 棋手模型
-
-**文件**: `player.py` | **表名**: `players`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 棋手ID |
-| `name` | String(200) | NOT NULL, 索引 | 棋手姓名 |
-| `title` | String(10) | 默认 '' | 头衔（GM/IM/FM/WGM等） |
-| `country` | String(100) | 默认 '', 索引 | 国家 |
-| `elo_rating` | Integer | 默认 0, 索引 | 等级分 |
-| `birth_date` | String(20) | 默认 '' | 出生日期 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| name | String(100) | ✓ | 棋手姓名 |
+| title | String(20) | | GM/IM/FM 等 |
+| country | String(50) | ✓ | 国家/地区 |
+| elo_rating | Integer | | 等级分 |
+| birth_date | Date | | 出生日期 |
+| bio | Text | | 简介 |
+| avatar_url | String(500) | | 头像 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**关系**:
-- `white_games` → Game（白方对局，foreign_keys='Game.white_player_id'）
-- `black_games` → Game（黑方对局，foreign_keys='Game.black_player_id'）
+**关系**：
+- `white_games` → 执白棋谱
+- `black_games` → 执黑棋谱
 
-**方法**:
-- `to_dict()` — 序列化
-- `get_stats()` — 计算胜/负/和统计，分白方/黑方统计
+**唯一约束**：`(name, country, birth_date)` - 避免重复
 
-**设计要点**: 一个棋手可参与多场对局，通过 `foreign_keys` 参数区分白方和黑方关系。`get_stats()` 实时查询计算统计数据。
+### 3. `tournaments`（赛事）
 
----
+文件：[`backend/app/models/tournament.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/tournament.py)
 
-### 3. Game — 棋谱模型
-
-**文件**: `game.py` | **表名**: `games`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 棋谱ID |
-| `game_number` | Integer | UNIQUE, 索引 | 棋谱编号（自动递增） |
-| `white_player_id` | Integer | FK→players.id, NOT NULL, 索引 | 白方棋手 |
-| `black_player_id` | Integer | FK→players.id, NOT NULL, 索引 | 黑方棋手 |
-| `tournament_id` | Integer | FK→tournaments.id, 索引 | 赛事 |
-| `date` | String(20) | 默认 '', 索引 | 对局日期 |
-| `result` | String(10) | 默认 '*' | 结果（1-0/0-1/1/2-1/2/*） |
-| `pgn_content` | Text | 默认 '' | PGN原始内容 |
-| `eco_code` | String(10) | 默认 '', 索引 | ECO开局代码 |
-| `opening_name` | String(200) | 默认 '' | 开局名称 |
-| `total_moves` | Integer | 默认 0 | 总着数 |
-| `final_fen` | String(100) | 默认 '' | 最终FEN |
-| `white_elo` | Integer | 可空 | 白方等级分 |
-| `black_elo` | Integer | 可空 | 黑方等级分 |
-| `termination` | String(50) | 默认 '' | 终局方式 |
-| `time_control` | String(30) | 默认 '' | 用时规则 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| name | String(200) | ✓ | 赛事名 |
+| location | String(200) | | 地点 |
+| start_date | Date | | 开始日期 |
+| end_date | Date | | 结束日期 |
+| category | String(50) | ✓ | 类别（古典/快棋/超快棋） |
+| time_control | String(50) | | 时限 |
+| description | Text | | 描述 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**关系**:
-- `analysis` → Analysis（一对一，uselist=False）
-- `collections` → Collection（一对多，dynamic）
-- `white_player` / `black_player` → Player（由 Player 反向定义）
-- `tournament` → Tournament（由 Tournament 反向定义）
+### 4. `games`（棋谱）
 
-**方法**:
-- `assign_game_number()` — 自动分配递增编号
-- `to_dict()` — 序列化（含棋手名称、赛事名称）
-- `get_moves_list()` — 解析 PGN 内容返回着法列表（含 SAN/UCI/FEN）
+文件：[`backend/app/models/game.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/game.py)
 
-**设计要点**: `game_number` 独立于 `id`，用于用户可见编号。`get_moves_list()` 使用 `chess.pgn` 实时解析，返回每步的 SAN、UCI、前后 FEN 等详细信息。
-
----
-
-### 4. Tournament — 赛事模型
-
-**文件**: `tournament.py` | **表名**: `tournaments`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 赛事ID |
-| `name` | String(200) | NOT NULL, 索引 | 赛事名称 |
-| `start_date` | String(20) | 默认 '' | 开始日期 |
-| `end_date` | String(20) | 默认 '' | 结束日期 |
-| `location` | String(200) | 默认 '' | 举办地点 |
-| `category` | String(50) | 默认 '' | 赛事类别 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| white_player_id | FK(players) | ✓ | 执白棋手 |
+| black_player_id | FK(players) | ✓ | 执黑棋手 |
+| tournament_id | FK(tournaments) | ✓ | 所属赛事（可空） |
+| event | String(200) | | 事件名 |
+| site | String(200) | | 地点 |
+| date | Date | ✓ | 对局日期 |
+| round | String(20) | | 轮次 |
+| result | String(10) | ✓ | 1-0 / 0-1 / 1/2-1/2 / * |
+| eco_code | String(10) | ✓ | ECO 编码 |
+| opening | String(200) | | 开局名 |
+| time_control | String(50) | | 时限 |
+| pgn_content | Text | | PGN 完整文本 |
+| moves_count | Integer | | 回合数 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**关系**:
-- `games` → Game（一对多，dynamic）
+**关系**：
+- `white_player` / `black_player` → Player
+- `tournament` → Tournament
+- `analysis` → Analysis（1:1，uselist=False）
+- `analysis_tasks` → AnalysisTask（1:N）
+- `collections` / `browsing_history` → 用户行为
 
-**方法**:
-- `to_dict()` — 序列化（含对局数量）
+### 5. `analyses` + `analysis_tasks`（分析）
 
-**设计要点**: 轻量级模型，仅存储赛事基本信息。日期使用 String 类型兼容 PGN 中的各种日期格式。
+文件：[`backend/app/models/analysis.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/analysis.py)
 
----
+**`analyses` 表**（分析结果，1:1 关联 game）：
 
-### 5. Analysis — 分析结果模型
-
-**文件**: `analysis.py` | **表名**: `analyses`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 分析ID |
-| `game_id` | Integer | FK→games.id, UNIQUE, NOT NULL, 索引 | 关联棋谱 |
-| `analysis_data` | Text | 默认 '{}' | JSON: 完整分析数据 |
-| `opening_eco` | String(10) | 默认 '' | 开局ECO代码 |
-| `key_moves` | Text | 默认 '[]' | JSON: 关键着法列表 |
-| `win_rate_curve` | Text | 默认 '[]' | JSON: 胜率曲线数据 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| game_id | FK(games) | ✓ unique | |
+| analysis_data | JSON | | 完整分析结果 |
+| key_moves | JSON | | 关键着法索引 |
+| win_rate_curve | JSON | | 胜率曲线 |
+| accuracy | Float | | 准确度（白方/黑方） |
+| average_loss | Float | | 平均损失 |
+| engine_name | String(50) | | 引擎名 |
+| depth | Integer | | 分析深度 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**关系**:
-- `game` → Game（一对一，backref）
+**`analysis_tasks` 表**（异步任务，1:N 关联 game）：
 
-**方法**:
-- `get_analysis_data()` / `set_analysis_data(data)` — JSON 序列化/反序列化
-- `get_key_moves()` / `set_key_moves(moves)` — JSON 序列化/反序列化
-- `get_win_rate_curve()` / `set_win_rate_curve(curve)` — JSON 序列化/反序列化
-- `to_dict()` — 序列化
-
-**设计要点**: 使用 Text 字段 + JSON 序列化存储复杂分析数据，避免大量关联表。`game_id` 设为 UNIQUE 确保每个棋谱只有一份分析结果。
-
----
-
-### 6. Opening — 开局库模型
-
-**文件**: `opening.py` | **表名**: `openings`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK | 开局ID |
-| `eco_code` | String(10) | UNIQUE, NOT NULL, 索引 | ECO代码 |
-| `name` | String(100) | NOT NULL | 开局名称 |
-| `variation` | String(100) | 默认 '' | 变例名称 |
-| `moves` | Text | 默认 '[]' | JSON: 着法序列 |
-| `category` | String(1) | 默认 'A', 索引 | ECO分类（A-E） |
-| `description` | Text | 默认 '' | 描述 |
-| `popularity` | Integer | 默认 0 | 流行度 |
-| `white_win_rate` | Float | 默认 50.0 | 白方胜率 |
-| `black_win_rate` | Float | 默认 50.0 | 黑方胜率 |
-| `draw_rate` | Float | 默认 0.0 | 和棋率 |
+| id | String(36) PK | | UUID |
+| game_id | FK(games) | ✓ | |
+| user_id | FK(users) | ✓ | 发起用户 |
+| status | String(20) | ✓ | pending/running/completed/failed/cancelled |
+| progress | Integer | | 0-100 |
+| depth | Integer | | 分析深度 |
+| threads | Integer | | 线程数 |
+| result | JSON | | 完成时填充 |
+| error_message | Text | | 失败原因 |
+| started_at | DateTime | | |
+| completed_at | DateTime | | |
+| created_at | DateTime | | |
 
-**方法**:
-- `get_moves_list()` — JSON 反序列化着法序列
-- `to_dict()` — 序列化
+### 6. `openings`（开局库）
 
-**设计要点**: ECO 分类 A-E 对应不同开局类型（A-侧翼开局, B-半开放, C-开放, D-封闭/半封闭, E-印度防御）。胜率数据用于开局库统计展示。
+文件：[`backend/app/models/opening.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/opening.py)
 
----
-
-### 7. Collection — 收藏模型
-
-**文件**: `collection.py` | **表名**: `collections`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 收藏ID |
-| `user_id` | Integer | FK→users.id, NOT NULL, 索引 | 用户 |
-| `game_id` | Integer | FK→games.id, NOT NULL, 索引 | 棋谱 |
-| `note` | Text | 默认 '' | 收藏备注 |
-| `created_at` | DateTime | 默认 utcnow | 收藏时间 |
+| id | Integer PK | | |
+| eco_code | String(10) | ✓ unique | ECO 编码（A00-E99） |
+| name | String(200) | | 开局名 |
+| variation | String(200) | | 变例 |
+| moves | JSON | | 着法列表 |
+| popularity | Integer | ✓ | 流行度 |
+| description | Text | | 描述 |
+| parent_id | FK(openings) | | 父开局（树结构） |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**约束**: `UniqueConstraint('user_id', 'game_id', name='uq_user_game')` — 同一用户不可重复收藏同一棋谱。
+**关系**：
+- `parent` → 父开局
+- `children` → 子开局
+- `games` → 关联棋谱
 
-**设计要点**: 典型的多对多关联表，附加 `note` 字段支持用户备注。
+### 7. `collections`（收藏）
 
----
+文件：[`backend/app/models/collection.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/collection.py)
 
-### 8. PracticeGame — 练习对局模型
-
-**文件**: `practice.py` | **表名**: `practice_games`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 练习ID |
-| `user_id` | Integer | FK→users.id, 索引 | 用户（可空=游客） |
-| `mode` | String(20) | NOT NULL | 模式（puzzle/from_game/custom） |
-| `puzzle_id` | Integer | FK→puzzles.id, 索引 | 关联残局 |
-| `source_game_id` | Integer | 可空 | 来源棋谱ID |
-| `from_move` | Integer | 可空 | 从第N步开始 |
-| `start_fen` | Text | 默认 '' | 起始FEN |
-| `user_color` | String(1) | 默认 'w' | 用户执子颜色 |
-| `difficulty` | String(20) | 默认 'medium' | 难度 |
-| `moves_json` | Text | 默认 '[]' | JSON: 走法历史 |
-| `final_fen` | Text | 默认 '' | 最终FEN |
-| `result` | String(10) | 默认 '*' | 结果 |
-| `total_moves` | Integer | 默认 0 | 总着数 |
-| `hints_used` | Integer | 默认 0 | 使用提示次数 |
-| `undo_count` | Integer | 默认 0 | 悔棋次数 |
-| `duration_seconds` | Integer | 可空 | 用时（秒） |
-| `analysis_json` | Text | 可空 | JSON: 复盘分析数据 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| user_id | FK(users) | ✓ | |
+| game_id | FK(games) | ✓ | |
+| note | Text | | 备注 |
+| created_at | DateTime | | |
 
-**设计要点**: `user_id` 可空支持游客练习。`moves_json` 存储完整走法历史用于复盘。`analysis_json` 存储复盘分析结果。
+**唯一约束**：`(user_id, game_id)` - 防止重复收藏
+**索引**：`user_id, created_at desc` - 用户收藏按时间倒序
 
----
+### 8. `browsing_history`（浏览历史）
 
-### 9. Puzzle — 残局题模型
+文件：[`backend/app/models/browsing_history.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/browsing_history.py)
 
-**文件**: `practice.py` | **表名**: `puzzles`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 残局ID |
-| `puzzle_number` | Integer | UNIQUE, 索引 | 残局编号 |
-| `name` | String(200) | NOT NULL | 残局名称 |
-| `category` | String(50) | 默认 'endgame' | 分类（endgame/tactics/mate） |
-| `difficulty` | String(20) | 默认 'medium' | 难度 |
-| `description` | Text | 默认 '' | 描述 |
-| `hint` | Text | 默认 '' | 提示 |
-| `fen` | Text | NOT NULL | FEN局面 |
-| `source_game_id` | Integer | FK→games.id, 索引 | 来源棋谱 |
-| `from_move` | Integer | 可空 | 从第N步截取 |
-| `created_by` | Integer | FK→users.id, 索引 | 创建者 |
-| `is_preset` | Boolean | 默认 False, 索引 | 是否预设残局 |
-| `practice_count` | Integer | 默认 0 | 练习次数 |
-| `solve_count` | Integer | 默认 0 | 解决次数 |
-| `created_at` | DateTime | 默认 utcnow | 创建时间 |
+| id | Integer PK | | |
+| user_id | FK(users) | ✓ | |
+| game_id | FK(games) | ✓ | |
+| viewed_at | DateTime | ✓ | 浏览时间 |
 
-**方法**:
-- `assign_puzzle_number()` — 预设残局编号 < 1000，用户创建编号 >= 1001
-- `to_dict(include_source=False)` — 序列化，可选包含来源棋谱信息
+**唯一约束**：`(user_id, game_id)` - 重复浏览刷新时间
 
-**设计要点**: 预设残局与用户创建残局通过编号区间区分。`practice_count` 和 `solve_count` 用于统计解题率。
+### 9. `puzzles` + `practice_games`（练习）
 
----
+文件：[`backend/app/models/practice.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/practice.py)
 
-### 10. BrowsingHistory — 浏览历史模型
+**`puzzles` 表**（残局题）：
 
-**文件**: `browsing_history.py` | **表名**: `browsing_history`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 字段 | 类型 | 索引 | 说明 |
 |------|------|------|------|
-| `id` | Integer | PK, 自增 | 记录ID |
-| `user_id` | Integer | FK→users.id, NOT NULL, 索引 | 用户 |
-| `game_id` | Integer | FK→games.id, NOT NULL, 索引 | 棋谱 |
-| `viewed_at` | DateTime | 默认 utcnow | 浏览时间 |
+| id | Integer PK | | |
+| puzzle_number | Integer | ✓ unique | 题号（预设 1-1000，用户 1001+） |
+| name | String(200) | | 题目名 |
+| description | Text | | 描述 |
+| fen | String(200) | | 初始局面 FEN |
+| solution | JSON | | 解法着法 |
+| category | String(50) | ✓ | king_pawn/queen_pawn/tactics/mate |
+| difficulty | String(20) | ✓ | easy/medium/hard/expert |
+| is_preset | Boolean | ✓ | 是否预设 |
+| created_by | FK(users) | ✓ | 创建者 |
+| practice_count | Integer | | 练习次数 |
+| solve_count | Integer | | 解出次数 |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
 
-**约束**: `UniqueConstraint('user_id', 'game_id', name='uq_user_game_browse')` — 同一用户对同一棋谱只保留一条记录，重复浏览更新时间。
+**`practice_games` 表**（练习对局）：
 
-**关系**: `game` → Game（joined eager loading）
+| 字段 | 类型 | 索引 | 说明 |
+|------|------|------|------|
+| id | Integer PK | | |
+| user_id | FK(users) | ✓ | |
+| mode | String(20) | ✓ | ai / puzzle / game |
+| difficulty | String(20) | | 难度 |
+| puzzle_id | FK(puzzles) | | 关联残局 |
+| starting_game_id | FK(games) | | 从棋谱开始 |
+| starting_fen | String(200) | | 起始 FEN |
+| user_color | String(10) | | 用户执子色 |
+| moves_json | JSON | | 完整着法记录 |
+| result | String(20) | | white_win/black_win/draw/ongoing |
+| review_data | JSON | | 复盘分析 |
+| started_at | DateTime | | |
+| ended_at | DateTime | | |
+| created_at | DateTime | | |
 
-**设计要点**: 使用 `lazy='joined'` 预加载关联棋谱，减少列表查询的 N+1 问题。
+### 10. 管理扩展表
 
----
+文件：[`backend/app/models/admin_models.py`](file:///d:/Users/pc/AppData/Local/Programs/trae_projects/ces/backend/app/models/admin_models.py)
 
-## 模型关系图
+**`modification_requests` 表**（修改申请）：
 
+| 字段 | 类型 | 索引 | 说明 |
+|------|------|------|------|
+| id | Integer PK | | |
+| user_id | FK(users) | ✓ | 申请人 |
+| target_type | String(50) | ✓ | game/puzzle/collection/player |
+| target_id | Integer | ✓ | 目标 ID |
+| action | String(20) | ✓ | create/update/delete |
+| payload_json | JSON | | 提交的数据 |
+| reason | Text | | 申请理由 |
+| status | String(20) | ✓ | pending/approved/rejected/cancelled |
+| reviewer_id | FK(users) | | 审核人 |
+| review_comment | Text | | 审核意见 |
+| reviewed_at | DateTime | | |
+| created_at | DateTime | | |
+| updated_at | DateTime | | |
+
+**`api_access_logs` 表**（API 访问日志）：
+
+| 字段 | 类型 | 索引 | 说明 |
+|------|------|------|------|
+| id | Integer PK | | |
+| method | String(10) | ✓ | HTTP 方法 |
+| path | String(500) | ✓ | 路径 |
+| status_code | Integer | ✓ | 状态码 |
+| duration_ms | Integer | | 耗时 |
+| user_id | FK(users) | | 用户（可空） |
+| username | String(80) | | 用户名 |
+| ip_address | String(50) | | IP |
+| token_fingerprint | String(20) | | JWT 摘要 |
+| user_agent | String(500) | | |
+| error_message | Text | | |
+| created_at | DateTime | ✓ | |
+
+## 数据库迁移
+
+使用 Flask-Migrate（Alembic）：
+
+```bash
+# 初始化（首次）
+flask db init
+
+# 生成迁移
+flask db migrate -m "add analysis_tasks table"
+
+# 应用迁移
+flask db upgrade
+
+# 回滚
+flask db downgrade
 ```
-User ──1:N── Collection ──N:1── Game
-User ──1:N── BrowsingHistory ──N:1── Game
-User ──1:N── PracticeGame
-User ──1:N── Puzzle (created_by)
 
-Game ──1:1── Analysis
-Game ──N:1── Player (white_player_id)
-Game ──N:1── Player (black_player_id)
-Game ──N:1── Tournament
-Game ──1:N── Puzzle (source_game_id)
+迁移文件位置：`backend/migrations/versions/`
 
-PracticeGame ──N:1── Puzzle
+## 索引策略
 
-Opening (独立表，通过 eco_code 与 Game.eco_code 逻辑关联)
-```
+| 表 | 索引 | 目的 |
+|----|------|------|
+| games | `eco_code`, `date`, `white_player_id`, `black_player_id`, `tournament_id` | 多维过滤 |
+| analyses | `game_id` unique | 一对一 |
+| analysis_tasks | `game_id`, `user_id`, `status` | 任务查询 |
+| collections | `(user_id, game_id)` unique | 去重 + 倒序 |
+| browsing_history | `(user_id, game_id)` unique, `viewed_at` | 倒序 |
+| puzzles | `puzzle_number` unique, `is_preset`, `category`, `difficulty` | 题号分配 + 过滤 |
+| practice_games | `user_id`, `mode` | 用户练习列表 |
+| modification_requests | `user_id`, `status`, `target_type` | 审核查询 |
+| api_access_logs | `created_at`, `user_id`, `path` | 流量统计 |
 
-## 通用设计模式
+## 初始化数据
 
-1. **JSON 字段存储**: `Analysis`、`PracticeGame`、`Opening` 使用 Text + JSON 序列化存储复杂嵌套数据，避免过度规范化
-2. **to_dict() 序列化**: 所有模型提供 `to_dict()` 方法，统一 API 响应格式
-3. **软删除**: 无软删除机制，删除操作直接移除记录
-4. **时间字段**: 统一使用 `datetime.utcnow` 作为默认值
-5. **索引策略**: 外键字段、查询过滤字段（如 `eco_code`、`date`）均建立索引
+`backend/init_db.py` 负责：
+
+1. 创建数据库表（`db.create_all()`）
+2. 灌入 10 道预设残局题（puzzle_number 1-10）
+3. 灌入常用开局（Eco 编码 A00-E99 主流）
+4. 创建默认管理员 `admin / chessdb123`
+
+启动脚本 `start-hf.sh` / `start-render.sh` 也会自动调用 `init_db`。
